@@ -26,13 +26,20 @@
 // producers and generated code bind them statically (no virtuals):
 //
 //   void  frame_begin(uint32_t w, uint32_t h, Color clear);
-//   void  quad (Rect dst, Color c, Rect clip);
+//   void  quad (Rect dst, Color c, uint32_t flags, Rect clip);
 //   void  image(Rect dst, TextureId t, Rect uv, Color tint, uint32_t flags,
 //               TextureId mask, Rect clip);
-//   void  sweep(Rect dst, Color c, float a0, float a1, float frac, Rect clip);
+//   void  sweep(Rect dst, Color c, float a0, float a1, float frac,
+//               TextureId mask, Rect clip);
 //   void  text        (Vec2 pen, std::string_view s, FontId f, Color c, Rect clip);
 //   void  text_stroked(Vec2 pen, std::string_view s, FontId f, Color c, Rect clip);
 //   void  frame_end();
+//
+// quad() honors the blend-mode bits of `flags` (solid glows and tint washes
+// are real); the sampling modifiers (grayscale/tile) are no-ops on a solid
+// fill — grayscale of a white texel is the identity. sweep()'s mask is the
+// shape the wedge is cut to, sampled across the destination rect exactly
+// like image()'s mask (0 = none).
 //   // the font surface — the sink owns its fonts (registered by id, like
 //   // textures), so it answers every layout question a producer has:
 //   float measure(FontId f, std::string_view s) const; // run advance width

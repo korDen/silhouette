@@ -27,7 +27,7 @@ CheapRaster render(F&& draw) {
 TEST(PixelMatch, IdenticalStreamsMatch) {
     auto draw = [](CheapRaster& r) {
         r.image({1, 1, 6, 6}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
-        r.quad({8, 8, 4, 4}, {1, 0, 0, 1}, kNoClip);
+        r.quad({8, 8, 4, 4}, {1, 0, 0, 1}, 0, kNoClip);
         r.text({1, 14}, "42", 2, {1, 1, 1, 1}, kNoClip);
     };
     const auto a = render(draw), b = render(draw);
@@ -41,10 +41,10 @@ TEST(PixelMatch, NonOverlappingOrderIsIrrelevant) {
     // differences exactly where a renderer's output cannot depend on them.
     const auto a = render([](CheapRaster& r) {
         r.image({0, 0, 6, 6}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
-        r.quad({10, 10, 5, 5}, {0, 1, 0, 1}, kNoClip);
+        r.quad({10, 10, 5, 5}, {0, 1, 0, 1}, 0, kNoClip);
     });
     const auto b = render([](CheapRaster& r) {
-        r.quad({10, 10, 5, 5}, {0, 1, 0, 1}, kNoClip);
+        r.quad({10, 10, 5, 5}, {0, 1, 0, 1}, 0, kNoClip);
         r.image({0, 0, 6, 6}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
     });
     EXPECT_TRUE(match_pixels(a, b).equal());
@@ -52,12 +52,12 @@ TEST(PixelMatch, NonOverlappingOrderIsIrrelevant) {
 
 TEST(PixelMatch, OverlappingOrderMattersAndBboxPinpointsIt) {
     const auto a = render([](CheapRaster& r) {
-        r.quad({2, 2, 8, 8}, {1, 0, 0, 1}, kNoClip);
-        r.quad({6, 6, 8, 8}, {0, 0, 1, 0.5f}, kNoClip); // translucent blue on top
+        r.quad({2, 2, 8, 8}, {1, 0, 0, 1}, 0, kNoClip);
+        r.quad({6, 6, 8, 8}, {0, 0, 1, 0.5f}, 0, kNoClip); // translucent blue on top
     });
     const auto b = render([](CheapRaster& r) {
-        r.quad({6, 6, 8, 8}, {0, 0, 1, 0.5f}, kNoClip);
-        r.quad({2, 2, 8, 8}, {1, 0, 0, 1}, kNoClip); // red now covers the overlap
+        r.quad({6, 6, 8, 8}, {0, 0, 1, 0.5f}, 0, kNoClip);
+        r.quad({2, 2, 8, 8}, {1, 0, 0, 1}, 0, kNoClip); // red now covers the overlap
     });
     const PixelDiff d = match_pixels(a, b);
     EXPECT_FALSE(d.equal());
@@ -72,19 +72,19 @@ TEST(PixelMatch, OverlappingOrderMattersAndBboxPinpointsIt) {
 TEST(PixelMatch, WrongTextureWrongColorWrongPlaceAllDetected) {
     const auto base = render([](CheapRaster& r) {
         r.image({2, 2, 8, 8}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
-        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, kNoClip);
+        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, 0, kNoClip);
     });
     const auto wrongTex = render([](CheapRaster& r) {
         r.image({2, 2, 8, 8}, 8, {0, 0, 1, 1}, {}, 0, 0, kNoClip); // wrong id
-        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, kNoClip);
+        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, 0, kNoClip);
     });
     const auto wrongColor = render([](CheapRaster& r) {
         r.image({2, 2, 8, 8}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
-        r.quad({12, 2, 3, 3}, {1, 0.1f, 0, 1}, kNoClip);
+        r.quad({12, 2, 3, 3}, {1, 0.1f, 0, 1}, 0, kNoClip);
     });
     const auto nudged = render([](CheapRaster& r) {
         r.image({3, 2, 8, 8}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip); // 1px right
-        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, kNoClip);
+        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, 0, kNoClip);
     });
     EXPECT_FALSE(match_pixels(base, wrongTex).equal());
     EXPECT_FALSE(match_pixels(base, wrongColor).equal());
@@ -156,8 +156,8 @@ TEST(PixelMatch, SizeMismatchIsItsOwnVerdict) {
 }
 
 TEST(PixelMatch, RawBufferOverloadAgrees) {
-    const auto a = render([](CheapRaster& r) { r.quad({1, 1, 4, 4}, {1, 0, 0, 1}, kNoClip); });
-    const auto b = render([](CheapRaster& r) { r.quad({1, 1, 4, 4}, {1, 0, 0, 1}, kNoClip); });
+    const auto a = render([](CheapRaster& r) { r.quad({1, 1, 4, 4}, {1, 0, 0, 1}, 0, kNoClip); });
+    const auto b = render([](CheapRaster& r) { r.quad({1, 1, 4, 4}, {1, 0, 0, 1}, 0, kNoClip); });
     EXPECT_TRUE(match_pixels(a.pixels(), b.pixels(), 16, 16).equal());
 }
 

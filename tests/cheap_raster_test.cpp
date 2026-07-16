@@ -52,7 +52,7 @@ TEST(CheapRasterQuad, PixelCenterCoverage) {
     CheapRaster r;
     r.frame_begin(8, 8, kBlack);
     // {2,2,4,4} spans centers 2.5..5.5 -> pixels 2..5 inclusive, no bleed.
-    r.quad({2, 2, 4, 4}, kWhite, kNoClip);
+    r.quad({2, 2, 4, 4}, kWhite, 0, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 2, 2), (std::array<int, 3>{255, 255, 255}));
     EXPECT_EQ(px(r, 5, 5), (std::array<int, 3>{255, 255, 255}));
@@ -65,7 +65,7 @@ TEST(CheapRasterQuad, PixelCenterCoverage) {
 TEST(CheapRasterQuad, SrcOverBlends) {
     CheapRaster r;
     r.frame_begin(2, 1, kBlack);
-    r.quad({0, 0, 2, 1}, Color{1, 1, 1, 0.5f}, kNoClip); // 50% white on black
+    r.quad({0, 0, 2, 1}, Color{1, 1, 1, 0.5f}, 0, kNoClip); // 50% white on black
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{128, 128, 128})); // 127.5 rounds up
 }
@@ -73,18 +73,35 @@ TEST(CheapRasterQuad, SrcOverBlends) {
 TEST(CheapRasterQuad, ClipCuts) {
     CheapRaster r;
     r.frame_begin(8, 2, kBlack);
-    r.quad({0, 0, 8, 2}, kWhite, Rect{0, 0, 3, 2});
+    r.quad({0, 0, 8, 2}, kWhite, 0, Rect{0, 0, 3, 2});
     r.frame_end();
     EXPECT_EQ(px(r, 2, 0), (std::array<int, 3>{255, 255, 255}));
     EXPECT_EQ(px(r, 3, 0), (std::array<int, 3>{0, 0, 0}));
 }
 
+TEST(CheapRasterQuad, BlendFlagsApplyToSolids) {
+    CheapRaster r;
+    r.frame_begin(4, 1, Color{0.5f, 0.5f, 0.5f, 1}); // dst = 128
+    r.quad({0, 0, 1, 1}, Color{1, 0, 0, 1}, kBlendAdditive, kNoClip);
+    r.quad({1, 0, 1, 1}, Color{0.5f, 0.5f, 0.5f, 1}, kBlendOverlay, kNoClip);
+    // sampling modifiers are no-ops on a solid: same as plain
+    r.quad({2, 0, 1, 1}, Color{1, 0, 0, 1}, kGrayscale | kTileU, kNoClip);
+    r.quad({3, 0, 1, 1}, Color{1, 0, 0, 1}, 0, kNoClip);
+    r.frame_end();
+    EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 128, 128})); // dst += src
+    // 2 * (128/255) * 0.5 = 128.0 exactly: a solid's source is the float
+    // color, unquantized — unlike a texel, which passes through u8 first.
+    EXPECT_EQ(px(r, 1, 0), (std::array<int, 3>{128, 128, 128}));
+    EXPECT_EQ(px(r, 2, 0), px(r, 3, 0));
+    EXPECT_EQ(px(r, 3, 0), (std::array<int, 3>{255, 0, 0}));
+}
+
 TEST(CheapRasterQuad, OffscreenAndDegenerateAreNoops) {
     CheapRaster r;
     r.frame_begin(4, 4, kBlack);
-    r.quad({-100, -100, 50, 50}, kWhite, kNoClip); // fully off-canvas
-    r.quad({1, 1, 0, 4}, kWhite, kNoClip);         // zero width
-    r.quad({1, 1, 4, -2}, kWhite, kNoClip);        // negative height
+    r.quad({-100, -100, 50, 50}, kWhite, 0, kNoClip); // fully off-canvas
+    r.quad({1, 1, 0, 4}, kWhite, 0, kNoClip);         // zero width
+    r.quad({1, 1, 4, -2}, kWhite, 0, kNoClip);        // negative height
     r.frame_end();
     for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x)
@@ -170,7 +187,7 @@ TEST(CheapRasterImageReal, OverlayIsTwiceDstTimesSrc) {
     r.frame_begin(2, 1, Color{0.5f, 0.5f, 0.5f, 1});
     r.image({0, 0, 1, 1}, 1, {0, 0, 1, 1}, {}, kBlendOverlay, 0, kNoClip);
     // black dst stays black no matter the src: 2*0*src = 0
-    r.quad({1, 0, 1, 1}, kBlack, kNoClip);
+    r.quad({1, 0, 1, 1}, kBlack, 0, kNoClip);
     r.image({1, 0, 1, 1}, 1, {0, 0, 1, 1}, {}, kBlendOverlay, 0, kNoClip);
     r.frame_end();
     // 2 * (128/255)^2 * 255 = 128.5 -> 129
@@ -307,7 +324,7 @@ TEST(CheapRasterImageSynthetic, MaskIdParticipates) {
 TEST(CheapRasterSweep, QuarterCoversTopRightQuadrant) {
     CheapRaster r;
     r.frame_begin(8, 8, kBlack);
-    r.sweep({0, 0, 8, 8}, kWhite, 0, 360, 0.25f, kNoClip);
+    r.sweep({0, 0, 8, 8}, kWhite, 0, 360, 0.25f, 0, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 6, 1), (std::array<int, 3>{255, 255, 255})); // 45° in
     EXPECT_EQ(px(r, 6, 6), (std::array<int, 3>{0, 0, 0}));       // 135° out
@@ -318,7 +335,7 @@ TEST(CheapRasterSweep, QuarterCoversTopRightQuadrant) {
 TEST(CheapRasterSweep, NegativeSpanRunsCounterClockwise) {
     CheapRaster r;
     r.frame_begin(8, 8, kBlack);
-    r.sweep({0, 0, 8, 8}, kWhite, 0, -360, 0.25f, kNoClip);
+    r.sweep({0, 0, 8, 8}, kWhite, 0, -360, 0.25f, 0, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 1, 1), (std::array<int, 3>{255, 255, 255})); // 315° in
     EXPECT_EQ(px(r, 6, 1), (std::array<int, 3>{0, 0, 0}));       // 45° out
@@ -327,20 +344,43 @@ TEST(CheapRasterSweep, NegativeSpanRunsCounterClockwise) {
 TEST(CheapRasterSweep, StartAngleRotatesTheWedge) {
     CheapRaster r;
     r.frame_begin(8, 8, kBlack);
-    r.sweep({0, 0, 8, 8}, kWhite, 90, 450, 0.25f, kNoClip); // 90°..180°
+    r.sweep({0, 0, 8, 8}, kWhite, 90, 450, 0.25f, 0, kNoClip); // 90°..180°
     r.frame_end();
     EXPECT_EQ(px(r, 6, 6), (std::array<int, 3>{255, 255, 255})); // 135° in
     EXPECT_EQ(px(r, 6, 1), (std::array<int, 3>{0, 0, 0}));       // 45° out
 }
 
+TEST(CheapRasterSweep, MaskCutsTheWedge) {
+    // Real mode: a 2x1 mask (opaque | transparent) cuts the full wedge to
+    // the left half, sampled across dst exactly like image()'s mask.
+    const uint8_t maskTex[8] = {255, 255, 255, 255, 255, 255, 255, 0};
+    CheapRaster r(TextureMode::kReal);
+    r.set_texture(2, {maskTex, 2, 1});
+    r.frame_begin(8, 8, kBlack);
+    r.sweep({0, 0, 8, 8}, kWhite, 0, 360, 1, 2, kNoClip);
+    r.frame_end();
+    EXPECT_EQ(px(r, 1, 4), (std::array<int, 3>{255, 255, 255})); // left kept
+    EXPECT_EQ(px(r, 6, 4), (std::array<int, 3>{0, 0, 0}));       // right cut
+    // Synthetic mode: the mask id participates with zero texture bytes.
+    auto synth = [](TextureId mask) {
+        CheapRaster s(TextureMode::kSynthetic);
+        s.frame_begin(8, 8, kBlack);
+        s.sweep({0, 0, 8, 8}, kWhite, 0, 360, 1, mask, kNoClip);
+        s.frame_end();
+        return std::vector<uint8_t>(s.pixels(), s.pixels() + 8 * 8 * 4);
+    };
+    EXPECT_NE(synth(0), synth(9));
+    EXPECT_NE(synth(9), synth(10));
+}
+
 TEST(CheapRasterSweep, FullAndZeroFractions) {
     CheapRaster r;
     r.frame_begin(4, 4, kBlack);
-    r.sweep({0, 0, 4, 4}, kWhite, 0, 360, 0, kNoClip); // nothing
+    r.sweep({0, 0, 4, 4}, kWhite, 0, 360, 0, 0, kNoClip); // nothing
     r.frame_end();
     EXPECT_EQ(px(r, 2, 2), (std::array<int, 3>{0, 0, 0}));
     r.frame_begin(4, 4, kBlack);
-    r.sweep({0, 0, 4, 4}, kWhite, 0, 360, 1, kNoClip); // the whole rect
+    r.sweep({0, 0, 4, 4}, kWhite, 0, 360, 1, 0, kNoClip); // the whole rect
     r.frame_end();
     for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x)

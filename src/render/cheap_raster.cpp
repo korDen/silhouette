@@ -136,7 +136,33 @@ void CheapRaster::fill(Rect dst, Color c, Rect clip) {
             blend_px(x, y, c.r, c.g, c.b, c.a, kBlendNormal);
 }
 
-void CheapRaster::quad(Rect dst, Color c, Rect clip) { fill(dst, c, clip); }
+void CheapRaster::quad(Rect dst, Color c, uint32_t flags, Rect clip) {
+    // Blend-mode bits apply to solids; sampling modifiers are no-ops (the
+    // implicit texel is white, and grayscale of white is white).
+    const uint32_t mode = flags & kBlendModeMask;
+    const Span s = span_of(dst, clip, w_, h_);
+    for (int y = s.y0; y < s.y1; ++y)
+        for (int x = s.x0; x < s.x1; ++x)
+            blend_px(x, y, c.r, c.g, c.b, c.a, mode);
+}
+
+float CheapRaster::mask_alpha(TextureId mask, float fx, float fy) const {
+    if (mask == 0) return 1.0f;
+    if (mode_ == TextureMode::kSynthetic) {
+        return synthetic_texel(mask,
+                               static_cast<uint32_t>(wrap_or_clamp(fx, kSyntheticGrid, false)),
+                               static_cast<uint32_t>(wrap_or_clamp(fy, kSyntheticGrid, false)))
+            .a;
+    }
+    const auto it = textures_.find(mask);
+    if (it == textures_.end() || it->second.rgba == nullptr ||
+        it->second.width == 0 || it->second.height == 0)
+        return 1.0f; // unregistered masks are ignored
+    const TextureData& md = it->second;
+    return fetch(md, wrap_or_clamp(fx, md.width, false),
+                 wrap_or_clamp(fy, md.height, false))
+        .a;
+}
 
 void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
                         uint32_t flags, TextureId mask, Rect clip) {
@@ -150,17 +176,11 @@ void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
     const bool tileV = (flags & kTileV) != 0;
 
     const TextureData* td = nullptr;
-    const TextureData* md = nullptr;
     if (mode_ == TextureMode::kReal) {
         if (auto it = textures_.find(t); it != textures_.end() &&
                                          it->second.rgba != nullptr &&
                                          it->second.width && it->second.height)
             td = &it->second;
-        if (mask != 0)
-            if (auto it = textures_.find(mask); it != textures_.end() &&
-                                                it->second.rgba != nullptr &&
-                                                it->second.width && it->second.height)
-                md = &it->second;
     }
 
     for (int y = s.y0; y < s.y1; ++y) {
@@ -184,20 +204,8 @@ void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
 
             // The alpha mask is the SHAPE the quad is cut to: it samples
             // across the destination extent (fx, fy), independent of the
-            // color UV rect and of tiling. Unregistered masks are ignored.
-            if (mask != 0) {
-                if (mode_ == TextureMode::kSynthetic) {
-                    src.a *= synthetic_texel(
-                                 mask,
-                                 static_cast<uint32_t>(wrap_or_clamp(fx, kSyntheticGrid, false)),
-                                 static_cast<uint32_t>(wrap_or_clamp(fy, kSyntheticGrid, false)))
-                                 .a;
-                } else if (md != nullptr) {
-                    src.a *= fetch(*md, wrap_or_clamp(fx, md->width, false),
-                                   wrap_or_clamp(fy, md->height, false))
-                                 .a;
-                }
-            }
+            // color UV rect and of tiling (mask_alpha).
+            src.a *= mask_alpha(mask, fx, fy);
 
             if (gray) { // luma BEFORE tint — the order tinted-gray art depends on
                 const float yl = 0.299f * src.r + 0.587f * src.g + 0.114f * src.b;
@@ -210,20 +218,22 @@ void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
 }
 
 void CheapRaster::sweep(Rect dst, Color c, float a0, float a1, float frac,
-                        Rect clip) {
+                        TextureId mask, Rect clip) {
     if (frac <= 0 || dst.w <= 0 || dst.h <= 0) return;
     if (frac > 1) frac = 1;
     const Span s = span_of(dst, clip, w_, h_);
     if (s.empty()) return;
 
     // Angles in degrees: 0° at 12 o'clock, positive clockwise. The wedge
-    // runs from a0 toward a1, covering `frac` of that arc.
+    // runs from a0 toward a1, covering `frac` of that arc; `mask` cuts it
+    // to a shape, sampled across dst like image()'s mask.
     const float spanDeg = (a1 - a0) * frac;
     const float cx = dst.x + dst.w * 0.5f;
     const float cy = dst.y + dst.h * 0.5f;
     constexpr float kRadToDeg = 57.29577951308232f; // 180/pi
 
     for (int y = s.y0; y < s.y1; ++y) {
+        const float fy = (static_cast<float>(y) + 0.5f - dst.y) / dst.h;
         for (int x = s.x0; x < s.x1; ++x) {
             const float dx = static_cast<float>(x) + 0.5f - cx;
             const float dy = static_cast<float>(y) + 0.5f - cy;
@@ -233,8 +243,13 @@ void CheapRaster::sweep(Rect dst, Color c, float a0, float a1, float frac,
             d = std::fmod(d, 360.0f);
             if (d < 0) d += 360.0f;
             const float extent = spanDeg >= 0 ? spanDeg : -spanDeg;
-            if (extent >= 360.0f || d <= extent)
-                blend_px(x, y, c.r, c.g, c.b, c.a, kBlendNormal);
+            if (extent < 360.0f && d > extent) continue;
+            float a = c.a;
+            if (mask != 0) {
+                const float fx = (static_cast<float>(x) + 0.5f - dst.x) / dst.w;
+                a *= mask_alpha(mask, fx, fy);
+            }
+            if (a > 0) blend_px(x, y, c.r, c.g, c.b, a, kBlendNormal);
         }
     }
 }

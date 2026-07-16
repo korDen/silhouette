@@ -72,10 +72,15 @@ class CheapRaster {
 
     // ---- Sink concept ------------------------------------------------
     void frame_begin(uint32_t w, uint32_t h, Color clear);
-    void quad(Rect dst, Color c, Rect clip);
+    // Solid fill. Blend-mode bits of `flags` apply (additive/overlay);
+    // sampling modifiers are no-ops on a solid (grayscale of white = white).
+    void quad(Rect dst, Color c, uint32_t flags, Rect clip);
     void image(Rect dst, TextureId t, Rect uv, Color tint, uint32_t flags,
                TextureId mask, Rect clip);
-    void sweep(Rect dst, Color c, float a0, float a1, float frac, Rect clip);
+    // Radial wedge, optionally cut to `mask` (sampled across dst, like
+    // image()'s mask; 0 = none, unregistered masks are ignored in kReal).
+    void sweep(Rect dst, Color c, float a0, float a1, float frac,
+               TextureId mask, Rect clip);
     // Synthetic text: one run of per-byte cells at a baseline-left pen.
     // Normative layout, all in pixels of the REGISTERED font size (pinned
     // by tests — changing any constant is a breaking change to the
@@ -113,10 +118,14 @@ class CheapRaster {
     const uint8_t* pixels() const { return buf_.data(); }
 
   private:
-    void fill(Rect dst, Color c, Rect clip); // solid, src-over (quad + text cells)
+    void fill(Rect dst, Color c, Rect clip); // solid, src-over (text cells)
     void blend_px(int x, int y, float r, float g, float b, float a, uint32_t mode);
     void run_cells(Vec2 pen, std::string_view s, FontId f, Color c, Rect clip,
                    float inflate);
+    // The mask rule shared by image() and sweep(): alpha of `mask` sampled
+    // at the destination fraction (fx, fy); 1 when mask == 0 or, in kReal,
+    // when the mask id is unregistered.
+    float mask_alpha(TextureId mask, float fx, float fy) const;
     float px_of(FontId f) const {
         const auto it = fonts_.find(f);
         return it == fonts_.end() ? 0.0f : it->second.px;

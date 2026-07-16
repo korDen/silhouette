@@ -14,6 +14,10 @@
       <Configuration>Debug</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="DebugAsan|x64">
+      <Configuration>DebugAsan</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
     <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
       <Platform>x64</Platform>
@@ -30,18 +34,32 @@
     <OutDir>$(SolutionDir)bin\$(Configuration)\$(ProjectName)\</OutDir>
     <IntDir>$(SolutionDir)obj\$(Configuration)\$(ProjectName)\</IntDir>
     <VcpkgEnableManifest>true</VcpkgEnableManifest>
-    <VcpkgTriplet>x64-windows-static-md</VcpkgTriplet>
     <!-- Static libraries: no runtime DLLs to deploy, so vcpkg's applocal
          copy step (which shells out to pwsh) is pure noise here. -->
     <VcpkgApplocalDeps>false</VcpkgApplocalDeps>
   </PropertyGroup>
 
+  <!-- Per-configuration toolchain selection. Each configuration installs the
+       manifest into its own vcpkg tree so the CRT/ASan variants never
+       collide. Only DebugAsan enables AddressSanitizer, via the in-repo
+       overlay triplet (triplets/) so nothing machine-local is required. -->
   <PropertyGroup Condition="'$(Configuration)'=='Debug'">
     <UseDebugLibraries>true</UseDebugLibraries>
+    <VcpkgInstalledDir>$(MSBuildThisFileDirectory)vcpkg_debug</VcpkgInstalledDir>
+    <VcpkgTriplet>x64-windows-static-md</VcpkgTriplet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='DebugAsan'">
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <EnableASAN>true</EnableASAN>
+    <VcpkgInstalledDir>$(MSBuildThisFileDirectory)vcpkg_debugasan</VcpkgInstalledDir>
+    <VcpkgTriplet>x64-windows-static-md-asan</VcpkgTriplet>
+    <VcpkgAdditionalInstallOptions>--overlay-triplets=$(MSBuildThisFileDirectory)triplets</VcpkgAdditionalInstallOptions>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
     <UseDebugLibraries>false</UseDebugLibraries>
     <WholeProgramOptimization>true</WholeProgramOptimization>
+    <VcpkgInstalledDir>$(MSBuildThisFileDirectory)vcpkg_release</VcpkgInstalledDir>
+    <VcpkgTriplet>x64-windows-static-md</VcpkgTriplet>
   </PropertyGroup>
 
   <!-- Warnings are errors at W4 for our code; dependency headers (angle
@@ -71,6 +89,12 @@
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='DebugAsan'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
     <ClCompile>
       <Optimization>MaxSpeed</Optimization>
@@ -83,4 +107,17 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
+
+  <!-- DebugAsan executables need the ASan runtime DLLs beside them to launch
+       outside a VS developer prompt (0xC0000135 otherwise). Deterministic
+       copy on every build: idempotent, nothing for IncrementalClean to
+       strip. -->
+  <Target Name="SilhouetteDeployAsanRuntime" AfterTargets="Build"
+          Condition="'$(ConfigurationType)'=='Application' And '$(Configuration)'=='DebugAsan'">
+    <ItemGroup>
+      <_AsanRuntimeDlls Include="$(VCToolsInstallDir)bin\Hostx64\x64\clang_rt.asan*_dynamic-x86_64.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_AsanRuntimeDlls)" DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>

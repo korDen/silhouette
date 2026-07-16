@@ -12,8 +12,14 @@ coverage discipline).
 bin\Debug\silhouette_tests\silhouette_tests.exe      # the gate
 ```
 
+- Configurations: **Debug** (iteration), **DebugAsan** (AddressSanitizer —
+  run the suite under it before landing), **Release**. Each installs the
+  vcpkg manifest into its own tree (`vcpkg_debug` / `vcpkg_debugasan` /
+  `vcpkg_release`) so CRT/ASan variants never collide; DebugAsan builds
+  dependencies ASan-instrumented via the in-repo overlay triplet
+  (`triplets/x64-windows-static-md-asan.cmake`).
 - vcpkg (manifest mode, `vcpkg.json`): gtest, unordered-dense. The MSBuild
-  vcpkg integration resolves them on first build; triplet
+  vcpkg integration resolves them on first build; base triplet
   `x64-windows-static-md`.
 - Tests are plain GTest console binaries — Visual Studio's Test Explorer
   discovers them from the solution; `msbuild` + running the exe is the CLI

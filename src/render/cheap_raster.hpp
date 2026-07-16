@@ -28,7 +28,7 @@
 // same registered textures) produces byte-identical buffers. That is the
 // property render/pixel_match.hpp builds on.
 #include "core/geometry.hpp"
-#include "paint/painter.hpp"
+#include "paint/sink.hpp"
 
 #include <ankerl/unordered_dense.h>
 
@@ -83,14 +83,15 @@ class CheapRaster {
     //   cell i = { pen.x + i*advance, pen.y - ascent + 0.1*px,
     //              0.85*advance, 0.75*px }
     //   fill   = color with alpha scaled by 0.4 + 0.4*hash01(byte, f)
-    //   stroked: every cell inflates by the registered strokeWidth on all
-    //            sides — same pen advances, fatter coverage.
-    // An unregistered (or degenerate px<=0) font draws loud magenta cells
-    // at a fixed 10px so the failure is impossible to miss. Alignment and
-    // decorations are producer-side patterns over the font surface, not
-    // primitive properties. The string is borrowed only for this call.
-    void text(Vec2 pen, std::string_view s, FontId f, Color c, Rect clip,
-              bool stroked);
+    // text_stroked draws the same run with every cell inflated by the
+    // registered strokeWidth on all sides — same pen advances, fatter
+    // coverage. An unregistered (or degenerate px<=0) font draws loud
+    // magenta cells at a fixed 10px so the failure is impossible to miss.
+    // Alignment and decorations are producer-side patterns over the font
+    // surface. The string is borrowed only for the call.
+    void text(Vec2 pen, std::string_view s, FontId f, Color c, Rect clip);
+    void text_stroked(Vec2 pen, std::string_view s, FontId f, Color c,
+                      Rect clip);
     void frame_end() {}
 
     // The font surface — synthetic metrics, normative pure functions of
@@ -114,6 +115,8 @@ class CheapRaster {
   private:
     void fill(Rect dst, Color c, Rect clip); // solid, src-over (quad + text cells)
     void blend_px(int x, int y, float r, float g, float b, float a, uint32_t mode);
+    void run_cells(Vec2 pen, std::string_view s, FontId f, Color c, Rect clip,
+                   float inflate);
     float px_of(FontId f) const {
         const auto it = fonts_.find(f);
         return it == fonts_.end() ? 0.0f : it->second.px;

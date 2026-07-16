@@ -7,7 +7,6 @@
   <ItemGroup>
     <ClCompile Include="tests\main.cpp" />
     <ClCompile Include="tests\geometry_test.cpp" />
-    <ClCompile Include="tests\painter_test.cpp" />
     <ClCompile Include="tests\cheap_raster_test.cpp" />
     <ClCompile Include="tests\equivalence_test.cpp" />
   </ItemGroup>

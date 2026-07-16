@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdio>
+#include <vector>
 
 namespace ui {
 namespace {
@@ -355,7 +357,7 @@ TEST(CheapRasterText, CellsLandAtThePen) {
     CheapRaster r;
     r.set_font(1, {8, 0});
     r.frame_begin(16, 16, kBlack);
-    r.text({2, 10}, "AB", 1, kWhite, kNoClip, false);
+    r.text({2, 10}, "AB", 1, kWhite, kNoClip);
     r.frame_end();
     EXPECT_NE(px(r, 3, 6), (std::array<int, 3>{0, 0, 0}));  // inside cell 0
     EXPECT_EQ(px(r, 5, 6), (std::array<int, 3>{0, 0, 0}));  // the gap between cells
@@ -370,7 +372,7 @@ TEST(CheapRasterText, PenMovesTheRun) {
         CheapRaster r;
         r.set_font(1, {8, 0});
         r.frame_begin(32, 16, kBlack);
-        r.text(pen, "A", 1, kWhite, kNoClip, false);
+        r.text(pen, "A", 1, kWhite, kNoClip);
         r.frame_end();
         return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
     };
@@ -384,7 +386,7 @@ TEST(CheapRasterText, ContentChangesPixels) {
         CheapRaster r;
         r.set_font(1, {8, 0});
         r.frame_begin(32, 16, kBlack);
-        r.text({0, 10}, s, 1, kWhite, kNoClip, false);
+        r.text({0, 10}, s, 1, kWhite, kNoClip);
         r.frame_end();
         return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
     };
@@ -398,7 +400,7 @@ TEST(CheapRasterText, FontIdentityAndSizeMatter) {
         CheapRaster r;
         r.set_font(id, {pxSize, 0});
         r.frame_begin(32, 16, kBlack);
-        r.text({0, 12}, "A", id, kWhite, kNoClip, false);
+        r.text({0, 12}, "A", id, kWhite, kNoClip);
         r.frame_end();
         return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
     };
@@ -411,7 +413,10 @@ TEST(CheapRasterText, StrokedInflatesCellsAtTheSameAdvances) {
         CheapRaster r;
         r.set_font(1, {8, 1.5f}); // a declared stroker
         r.frame_begin(16, 16, kBlack);
-        r.text({4, 10}, "A", 1, kWhite, kNoClip, stroked);
+        if (stroked)
+            r.text_stroked({4, 10}, "A", 1, kWhite, kNoClip);
+        else
+            r.text({4, 10}, "A", 1, kWhite, kNoClip);
         r.frame_end();
         return r;
     };
@@ -443,14 +448,14 @@ TEST(CheapRasterText, EmptyIsANoopUnregisteredIsLoud) {
     CheapRaster r;
     r.set_font(1, {8, 0});
     r.frame_begin(16, 16, kBlack);
-    r.text({0, 8}, "", 1, kWhite, kNoClip, false); // empty: nothing
+    r.text({0, 8}, "", 1, kWhite, kNoClip); // empty: nothing
     r.frame_end();
     for (int y = 0; y < 16; ++y)
         for (int x = 0; x < 16; ++x)
             EXPECT_EQ(px(r, x, y), (std::array<int, 3>{0, 0, 0}));
     // An unregistered font cannot be silent: fixed-size magenta cells.
     r.frame_begin(16, 16, kBlack);
-    r.text({2, 12}, "A", 42, kWhite, kNoClip, false);
+    r.text({2, 12}, "A", 42, kWhite, kNoClip);
     r.frame_end();
     const auto loud = px(r, 3, 8);
     EXPECT_GT(loud[0], 0);
@@ -462,11 +467,36 @@ TEST(CheapRasterText, ClipCutsCells) {
     CheapRaster r;
     r.set_font(1, {8, 0});
     r.frame_begin(32, 8, kBlack);
-    r.text({0, 7}, "AAAA", 1, kWhite, Rect{0, 0, 6, 8}, false);
+    r.text({0, 7}, "AAAA", 1, kWhite, Rect{0, 0, 6, 8});
     r.frame_end();
     EXPECT_NE(px(r, 1, 3), (std::array<int, 3>{0, 0, 0}));
     for (int x = 6; x < 32; ++x) // everything past the clip is untouched
         EXPECT_EQ(px(r, x, 3), (std::array<int, 3>{0, 0, 0}));
+}
+
+TEST(CheapRasterText, StringIsBorrowedOnlyDuringTheCall) {
+    // The sprintf pattern the contract exists for: the same stack buffer,
+    // reused between calls. The sink must have consumed the bytes before
+    // returning — the frame equals one drawn from separate literals.
+    CheapRaster a;
+    a.set_font(1, {8, 0});
+    a.frame_begin(32, 16, kBlack);
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "10");
+    a.text({0, 10}, buf, 1, kWhite, kNoClip);
+    std::snprintf(buf, sizeof buf, "16");
+    a.text({16, 10}, buf, 1, kWhite, kNoClip);
+    a.frame_end();
+
+    CheapRaster b;
+    b.set_font(1, {8, 0});
+    b.frame_begin(32, 16, kBlack);
+    b.text({0, 10}, "10", 1, kWhite, kNoClip);
+    b.text({16, 10}, "16", 1, kWhite, kNoClip);
+    b.frame_end();
+
+    EXPECT_EQ(std::vector<uint8_t>(a.pixels(), a.pixels() + 32 * 16 * 4),
+              std::vector<uint8_t>(b.pixels(), b.pixels() + 32 * 16 * 4));
 }
 
 } // namespace

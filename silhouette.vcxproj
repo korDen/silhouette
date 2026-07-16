@@ -8,7 +8,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core\geometry.hpp" />
-    <ClInclude Include="src\paint\painter.hpp" />
+    <ClInclude Include="src\paint\sink.hpp" />
     <ClInclude Include="src\render\cheap_raster.hpp" />
     <ClInclude Include="src\render\pixel_match.hpp" />
   </ItemGroup>

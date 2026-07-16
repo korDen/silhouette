@@ -240,13 +240,22 @@ void CheapRaster::sweep(Rect dst, Color c, float a0, float a1, float frac,
 }
 
 void CheapRaster::text(Vec2 pen, std::string_view str, FontId f, Color c,
-                       Rect clip, bool stroked) {
+                       Rect clip) {
+    run_cells(pen, str, f, c, clip, 0.0f);
+}
+
+void CheapRaster::text_stroked(Vec2 pen, std::string_view str, FontId f,
+                               Color c, Rect clip) {
+    run_cells(pen, str, f, c, clip, outline_width(f));
+}
+
+void CheapRaster::run_cells(Vec2 pen, std::string_view str, FontId f, Color c,
+                            Rect clip, float inflate) {
     if (str.empty()) return;
     // The normative synthetic layout — see the header. Pinned by tests.
     // One run at the baseline-left pen; decorations (shadows, outlines) and
     // alignment are producer-side patterns built on the font surface.
     float px = px_of(f);
-    float inflate = stroked ? outline_width(f) : 0.0f;
     Color col = c;
     if (px <= 0) { // unregistered or degenerate: loud, deterministic
         px = 10;

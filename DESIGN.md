@@ -47,17 +47,17 @@ Why this shape (both reasons are load-bearing):
   backend — and is exactly where cross-pipeline z-order bugs come from. Sinks
   receive a strict painter-order stream; what each builds from it is private.
 
-The seam has two pieces (`src/paint/painter.hpp`):
-
-- **The Sink concept** — six functions (`frame_begin`, `quad`, `image`,
-  `sweep`, `text`, `frame_end`), statically bound (template), no virtuals on
-  the hot path. Producers are templates over the sink; generated drawing code
-  instantiates per backend. A type-erased adapter (function-pointer table) can
-  be added if a tool ever needs runtime backend switching.
-- **`Painter<S>`** — the one shared front-end: owns the group stacks
-  (offset / alpha / clip), folds them, forwards fully resolved primitives
-  (absolute rect, final alpha, absolute clip). Group math exists exactly once;
-  sinks stay straight-line code.
+The seam is one thing (`src/paint/sink.hpp`): **the Sink concept** — the
+emit functions plus the font surface, statically bound, no virtuals on the
+hot path. Producers and generated drawing code call sinks directly. There is
+**no emit-side state**: no offset/alpha/clip stacks, no shared front-end.
+Producers pass positions down and fold alpha into colors themselves —
+generated code does this naturally, every call is fully determined by its
+arguments, and backend complexity is the metric that matters (emit paths are
+generated; backends are hand-maintained). `clip` is plain per-call data.
+Group operations (transitions) return as a producer-side layer when that
+feature does. A type-erased adapter (function-pointer table) can be added if
+a tool ever needs runtime backend switching.
 
 ## The primitive set (current)
 
@@ -72,14 +72,16 @@ calls — and no larger:
   shape the quad is cut to, independent of the color UV).
 - **sweep** — radial progress wedge: angle range, covered fraction, flat
   color. Angles in degrees, 0° at 12 o'clock, positive clockwise.
-- **text** — ONE run of glyphs at a baseline-left pen position: string
-  (call-duration borrowed) + font id + color + a `stroked` selector for the
-  font's pre-stroked variants (same pen advances, fatter coverage).
-  Deliberately minimal: alignment is producer arithmetic over the sink's
-  font surface; a shadow is the same run drawn first at an offset in
-  another color; an outline is a stroked under-pass where the font declares
-  a stroker, offset copies where it does not. Label semantics live in
-  producers, not in backends.
+- **text / text_stroked** — ONE run of glyphs at a baseline-left pen
+  position: string (call-duration borrowed) + font id + color.
+  `text_stroked` draws the font's pre-stroked variants (same layout, same
+  pen advances, fatter coverage) — a different glyph source is a different
+  method, so call sites read unambiguously and GPU backends map each onto
+  its own pipeline. Deliberately minimal: alignment is producer arithmetic
+  over the sink's font surface; a shadow is the same run drawn first at an
+  offset in another color; an outline is a stroked under-pass where the
+  font declares a stroker, offset copies where it does not. Label semantics
+  live in producers, not in backends.
 
 Fonts mirror textures: hosts register them by opaque id (`FontId` — one id
 per face/size/stroker combination), and the sink answers every layout
@@ -150,7 +152,7 @@ format is defined; the architecture reserves them first-class seats.
 
 ```
 src/core/      geometry value types (constexpr)
-src/paint/     the emit seam: sink concept + Painter<S>
+src/paint/     the emit seam: sink.hpp (the Sink concept + ids + flags)
 src/render/    CPU renderers + pixel-match harness
 tests/         GTest; most of the value lives here
 ext/slughorn/  submodule — analytic glyph coverage (quality renderer, GPU)

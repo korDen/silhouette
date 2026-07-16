@@ -54,16 +54,17 @@ bin\Debug\silhouette_tests\silhouette_tests.exe      # the gate
 
 ```
 src/core/      Rect/Vec2/Color (constexpr value types)
-src/paint/     painter.hpp — the Sink concept + Painter<S> (group stacks)
+src/paint/     sink.hpp — the Sink concept (emit + font surface, ids, flags)
 src/render/    cheap_raster (fast CPU sink, real/synthetic texture modes),
                pixel_match (the equivalence harness)
-tests/         GTest — geometry, painter, raster pixels, equivalence
+tests/         GTest — geometry, raster pixels, equivalence
 ext/slughorn/  submodule (quality text, later stage)
 ```
 
 ## Current state
 
-Early rebuild. Landed: core geometry, the paint seam (sink concept +
-Painter), the cheap CPU renderer (both texture modes) with the pixel-match
-harness. Next per DESIGN.md's render ladder: quality CPU renderer (slughorn +
-HarfBuzz text), then Vulkan, then Metal.
+Early rebuild. Landed: core geometry, the emit seam (the Sink concept —
+called directly, no emit-side state), the cheap CPU renderer (both texture
+modes, full font surface) with the pixel-match harness. Next per DESIGN.md's
+render ladder: quality CPU renderer (slughorn + HarfBuzz text), then Vulkan,
+then Metal.

@@ -2,6 +2,8 @@
 // configuration. These tests pin the doctrine — order-tolerant exactly where
 // order cannot matter, strict where it must, sensitive to content, position,
 // flags, and size — using the synthetic mode, i.e. with zero texture bytes.
+// Sinks are called directly: no emit-side state exists, so every call reads
+// exactly as it renders.
 #include "render/pixel_match.hpp"
 
 #include <gtest/gtest.h>
@@ -16,18 +18,17 @@ CheapRaster render(F&& draw) {
     CheapRaster r(TextureMode::kSynthetic);
     r.set_font(1, {8, 0}); // both sides of a comparison share one font world
     r.set_font(2, {6, 0});
-    Painter<CheapRaster> p(r);
-    p.frame_begin(16, 16, kBlack);
-    draw(p);
-    p.frame_end();
+    r.frame_begin(16, 16, kBlack);
+    draw(r);
+    r.frame_end();
     return r;
 }
 
 TEST(PixelMatch, IdenticalStreamsMatch) {
-    auto draw = [](Painter<CheapRaster>& p) {
-        p.image({1, 1, 6, 6}, 7);
-        p.quad({8, 8, 4, 4}, {1, 0, 0, 1});
-        p.text({1, 14}, "42", 2, {1, 1, 1, 1});
+    auto draw = [](CheapRaster& r) {
+        r.image({1, 1, 6, 6}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
+        r.quad({8, 8, 4, 4}, {1, 0, 0, 1}, kNoClip);
+        r.text({1, 14}, "42", 2, {1, 1, 1, 1}, kNoClip);
     };
     const auto a = render(draw), b = render(draw);
     const PixelDiff d = match_pixels(a, b);
@@ -38,25 +39,25 @@ TEST(PixelMatch, IdenticalStreamsMatch) {
 TEST(PixelMatch, NonOverlappingOrderIsIrrelevant) {
     // Disjoint draws in either order — the relation tolerates emit-order
     // differences exactly where a renderer's output cannot depend on them.
-    const auto a = render([](Painter<CheapRaster>& p) {
-        p.image({0, 0, 6, 6}, 7);
-        p.quad({10, 10, 5, 5}, {0, 1, 0, 1});
+    const auto a = render([](CheapRaster& r) {
+        r.image({0, 0, 6, 6}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
+        r.quad({10, 10, 5, 5}, {0, 1, 0, 1}, kNoClip);
     });
-    const auto b = render([](Painter<CheapRaster>& p) {
-        p.quad({10, 10, 5, 5}, {0, 1, 0, 1});
-        p.image({0, 0, 6, 6}, 7);
+    const auto b = render([](CheapRaster& r) {
+        r.quad({10, 10, 5, 5}, {0, 1, 0, 1}, kNoClip);
+        r.image({0, 0, 6, 6}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
     });
     EXPECT_TRUE(match_pixels(a, b).equal());
 }
 
 TEST(PixelMatch, OverlappingOrderMattersAndBboxPinpointsIt) {
-    const auto a = render([](Painter<CheapRaster>& p) {
-        p.quad({2, 2, 8, 8}, {1, 0, 0, 1});
-        p.quad({6, 6, 8, 8}, {0, 0, 1, 0.5f}); // translucent blue on top
+    const auto a = render([](CheapRaster& r) {
+        r.quad({2, 2, 8, 8}, {1, 0, 0, 1}, kNoClip);
+        r.quad({6, 6, 8, 8}, {0, 0, 1, 0.5f}, kNoClip); // translucent blue on top
     });
-    const auto b = render([](Painter<CheapRaster>& p) {
-        p.quad({6, 6, 8, 8}, {0, 0, 1, 0.5f});
-        p.quad({2, 2, 8, 8}, {1, 0, 0, 1}); // red now covers the overlap
+    const auto b = render([](CheapRaster& r) {
+        r.quad({6, 6, 8, 8}, {0, 0, 1, 0.5f}, kNoClip);
+        r.quad({2, 2, 8, 8}, {1, 0, 0, 1}, kNoClip); // red now covers the overlap
     });
     const PixelDiff d = match_pixels(a, b);
     EXPECT_FALSE(d.equal());
@@ -69,21 +70,21 @@ TEST(PixelMatch, OverlappingOrderMattersAndBboxPinpointsIt) {
 }
 
 TEST(PixelMatch, WrongTextureWrongColorWrongPlaceAllDetected) {
-    const auto base = render([](Painter<CheapRaster>& p) {
-        p.image({2, 2, 8, 8}, 7);
-        p.quad({12, 2, 3, 3}, {1, 0, 0, 1});
+    const auto base = render([](CheapRaster& r) {
+        r.image({2, 2, 8, 8}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
+        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, kNoClip);
     });
-    const auto wrongTex = render([](Painter<CheapRaster>& p) {
-        p.image({2, 2, 8, 8}, 8); // different texture id
-        p.quad({12, 2, 3, 3}, {1, 0, 0, 1});
+    const auto wrongTex = render([](CheapRaster& r) {
+        r.image({2, 2, 8, 8}, 8, {0, 0, 1, 1}, {}, 0, 0, kNoClip); // wrong id
+        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, kNoClip);
     });
-    const auto wrongColor = render([](Painter<CheapRaster>& p) {
-        p.image({2, 2, 8, 8}, 7);
-        p.quad({12, 2, 3, 3}, {1, 0.1f, 0, 1});
+    const auto wrongColor = render([](CheapRaster& r) {
+        r.image({2, 2, 8, 8}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
+        r.quad({12, 2, 3, 3}, {1, 0.1f, 0, 1}, kNoClip);
     });
-    const auto nudged = render([](Painter<CheapRaster>& p) {
-        p.image({3, 2, 8, 8}, 7); // one pixel to the right
-        p.quad({12, 2, 3, 3}, {1, 0, 0, 1});
+    const auto nudged = render([](CheapRaster& r) {
+        r.image({3, 2, 8, 8}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip); // 1px right
+        r.quad({12, 2, 3, 3}, {1, 0, 0, 1}, kNoClip);
     });
     EXPECT_FALSE(match_pixels(base, wrongTex).equal());
     EXPECT_FALSE(match_pixels(base, wrongColor).equal());
@@ -91,29 +92,37 @@ TEST(PixelMatch, WrongTextureWrongColorWrongPlaceAllDetected) {
 }
 
 TEST(PixelMatch, FlagAndMaskDifferencesAreDetectedTextureFree) {
-    const auto plain = render([](Painter<CheapRaster>& p) { p.image({2, 2, 10, 10}, 7); });
-    const auto gray = render([](Painter<CheapRaster>& p) {
-        p.image({2, 2, 10, 10}, 7, {0, 0, 1, 1}, {}, kGrayscale);
+    const auto plain = render([](CheapRaster& r) {
+        r.image({2, 2, 10, 10}, 7, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
     });
-    const auto masked = render([](Painter<CheapRaster>& p) {
-        p.image({2, 2, 10, 10}, 7, {0, 0, 1, 1}, {}, 0, /*mask=*/9);
+    const auto gray = render([](CheapRaster& r) {
+        r.image({2, 2, 10, 10}, 7, {0, 0, 1, 1}, {}, kGrayscale, 0, kNoClip);
+    });
+    const auto masked = render([](CheapRaster& r) {
+        r.image({2, 2, 10, 10}, 7, {0, 0, 1, 1}, {}, 0, /*mask=*/9, kNoClip);
     });
     EXPECT_FALSE(match_pixels(plain, gray).equal());
     EXPECT_FALSE(match_pixels(plain, masked).equal());
 }
 
 TEST(PixelMatch, TextDifferencesAreDetected) {
-    const auto a = render([](Painter<CheapRaster>& p) {
-        p.text({1, 8}, "10", 1, {1, 1, 1, 1});
+    const auto a = render([](CheapRaster& r) {
+        r.text({1, 8}, "10", 1, {1, 1, 1, 1}, kNoClip);
     });
-    const auto b = render([](Painter<CheapRaster>& p) {
-        p.text({1, 8}, "16", 1, {1, 1, 1, 1});
+    const auto b = render([](CheapRaster& r) {
+        r.text({1, 8}, "16", 1, {1, 1, 1, 1}, kNoClip);
     });
     EXPECT_FALSE(match_pixels(a, b).equal());
-    const auto wrongFont = render([](Painter<CheapRaster>& p) {
-        p.text({1, 8}, "10", 2, {1, 1, 1, 1});
+    const auto wrongFont = render([](CheapRaster& r) {
+        r.text({1, 8}, "10", 2, {1, 1, 1, 1}, kNoClip);
     });
     EXPECT_FALSE(match_pixels(a, wrongFont).equal());
+    const auto stroked = render([](CheapRaster& r) {
+        r.text_stroked({1, 8}, "10", 1, {1, 1, 1, 1}, kNoClip);
+    });
+    // Font 1 declares no stroker: stroked degrades to the plain run, and the
+    // relation rightly calls them the same picture.
+    EXPECT_TRUE(match_pixels(a, stroked).equal());
 }
 
 TEST(PixelMatch, DecorationsAreProducerPatterns) {
@@ -123,14 +132,14 @@ TEST(PixelMatch, DecorationsAreProducerPatterns) {
     // (The shadow must be a color that shows on the black canvas — a black
     // shadow on black is genuinely invisible, and the gate rightly calls
     // streams with and without it equivalent.)
-    auto shadowed = [](Painter<CheapRaster>& p) {
-        p.text({3, 9}, "42", 1, {1, 0, 0, 1}); // the under-pass
-        p.text({2, 8}, "42", 1, {1, 1, 1, 1}); // the fill
+    auto shadowed = [](CheapRaster& r) {
+        r.text({3, 9}, "42", 1, {1, 0, 0, 1}, kNoClip); // the under-pass
+        r.text({2, 8}, "42", 1, {1, 1, 1, 1}, kNoClip); // the fill
     };
     const auto a = render(shadowed), b = render(shadowed);
     EXPECT_TRUE(match_pixels(a, b).equal());
-    const auto noShadow = render([](Painter<CheapRaster>& p) {
-        p.text({2, 8}, "42", 1, {1, 1, 1, 1});
+    const auto noShadow = render([](CheapRaster& r) {
+        r.text({2, 8}, "42", 1, {1, 1, 1, 1}, kNoClip);
     });
     EXPECT_FALSE(match_pixels(a, noShadow).equal());
 }
@@ -147,8 +156,8 @@ TEST(PixelMatch, SizeMismatchIsItsOwnVerdict) {
 }
 
 TEST(PixelMatch, RawBufferOverloadAgrees) {
-    const auto a = render([](Painter<CheapRaster>& p) { p.quad({1, 1, 4, 4}, {1, 0, 0, 1}); });
-    const auto b = render([](Painter<CheapRaster>& p) { p.quad({1, 1, 4, 4}, {1, 0, 0, 1}); });
+    const auto a = render([](CheapRaster& r) { r.quad({1, 1, 4, 4}, {1, 0, 0, 1}, kNoClip); });
+    const auto b = render([](CheapRaster& r) { r.quad({1, 1, 4, 4}, {1, 0, 0, 1}, kNoClip); });
     EXPECT_TRUE(match_pixels(a.pixels(), b.pixels(), 16, 16).equal());
 }
 

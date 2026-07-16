@@ -73,11 +73,21 @@ calls — and no larger:
 - **sweep** — radial progress wedge: angle range, covered fraction, flat
   color. Angles in degrees, 0° at 12 o'clock, positive clockwise.
 - **text** — ONE run of glyphs at a baseline-left pen position: string
-  (call-duration borrowed) + font (opaque face id + pixel size) + color.
+  (call-duration borrowed) + font id + color + a `stroked` selector for the
+  font's pre-stroked variants (same pen advances, fatter coverage).
   Deliberately minimal: alignment is producer arithmetic over the sink's
-  metrics (`measure` / `ascent` / `line_height`); a shadow is the same run
-  drawn first at an offset in another color; an outline is the same at
-  several offsets. Label semantics live in producers, not in backends.
+  font surface; a shadow is the same run drawn first at an offset in
+  another color; an outline is a stroked under-pass where the font declares
+  a stroker, offset copies where it does not. Label semantics live in
+  producers, not in backends.
+
+Fonts mirror textures: hosts register them by opaque id (`FontId` — one id
+per face/size/stroker combination), and the sink answers every layout
+question a producer has: `measure(id, s)`, `ascent(id)`, `line_height(id)`,
+`outline_width(id)` (0 = no stroked variants). The cheap renderer's font
+world is synthetic — normative formulas of the registered pixel size — so
+producers take the same layout branches they would against a real backend,
+with no font bytes involved.
 
 ## The render ladder (build order)
 

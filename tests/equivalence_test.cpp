@@ -14,6 +14,8 @@ constexpr Color kBlack{0, 0, 0, 1};
 template <class F>
 CheapRaster render(F&& draw) {
     CheapRaster r(TextureMode::kSynthetic);
+    r.set_font(1, {8, 0}); // both sides of a comparison share one font world
+    r.set_font(2, {6, 0});
     Painter<CheapRaster> p(r);
     p.frame_begin(16, 16, kBlack);
     draw(p);
@@ -25,7 +27,7 @@ TEST(PixelMatch, IdenticalStreamsMatch) {
     auto draw = [](Painter<CheapRaster>& p) {
         p.image({1, 1, 6, 6}, 7);
         p.quad({8, 8, 4, 4}, {1, 0, 0, 1});
-        p.text({1, 14}, "42", Font{1, 6}, {1, 1, 1, 1});
+        p.text({1, 14}, "42", 2, {1, 1, 1, 1});
     };
     const auto a = render(draw), b = render(draw);
     const PixelDiff d = match_pixels(a, b);
@@ -102,12 +104,16 @@ TEST(PixelMatch, FlagAndMaskDifferencesAreDetectedTextureFree) {
 
 TEST(PixelMatch, TextDifferencesAreDetected) {
     const auto a = render([](Painter<CheapRaster>& p) {
-        p.text({1, 8}, "10", Font{1, 8}, {1, 1, 1, 1});
+        p.text({1, 8}, "10", 1, {1, 1, 1, 1});
     });
     const auto b = render([](Painter<CheapRaster>& p) {
-        p.text({1, 8}, "16", Font{1, 8}, {1, 1, 1, 1});
+        p.text({1, 8}, "16", 1, {1, 1, 1, 1});
     });
     EXPECT_FALSE(match_pixels(a, b).equal());
+    const auto wrongFont = render([](Painter<CheapRaster>& p) {
+        p.text({1, 8}, "10", 2, {1, 1, 1, 1});
+    });
+    EXPECT_FALSE(match_pixels(a, wrongFont).equal());
 }
 
 TEST(PixelMatch, DecorationsAreProducerPatterns) {
@@ -118,13 +124,13 @@ TEST(PixelMatch, DecorationsAreProducerPatterns) {
     // shadow on black is genuinely invisible, and the gate rightly calls
     // streams with and without it equivalent.)
     auto shadowed = [](Painter<CheapRaster>& p) {
-        p.text({3, 9}, "42", Font{1, 8}, {1, 0, 0, 1}); // the under-pass
-        p.text({2, 8}, "42", Font{1, 8}, {1, 1, 1, 1}); // the fill
+        p.text({3, 9}, "42", 1, {1, 0, 0, 1}); // the under-pass
+        p.text({2, 8}, "42", 1, {1, 1, 1, 1}); // the fill
     };
     const auto a = render(shadowed), b = render(shadowed);
     EXPECT_TRUE(match_pixels(a, b).equal());
     const auto noShadow = render([](Painter<CheapRaster>& p) {
-        p.text({2, 8}, "42", Font{1, 8}, {1, 1, 1, 1});
+        p.text({2, 8}, "42", 1, {1, 1, 1, 1});
     });
     EXPECT_FALSE(match_pixels(a, noShadow).equal());
 }

@@ -239,21 +239,29 @@ void CheapRaster::sweep(Rect dst, Color c, float a0, float a1, float frac,
     }
 }
 
-void CheapRaster::text(Vec2 pen, std::string_view str, Font f, Color c,
-                       Rect clip) {
-    if (str.empty() || f.px <= 0) return;
+void CheapRaster::text(Vec2 pen, std::string_view str, FontId f, Color c,
+                       Rect clip, bool stroked) {
+    if (str.empty()) return;
     // The normative synthetic layout — see the header. Pinned by tests.
     // One run at the baseline-left pen; decorations (shadows, outlines) and
-    // alignment are producer-side patterns built on measure()/ascent().
-    const float adv = 0.5f * f.px;
-    const float top = pen.y - ascent(f) + 0.1f * f.px;
+    // alignment are producer-side patterns built on the font surface.
+    float px = px_of(f);
+    float inflate = stroked ? outline_width(f) : 0.0f;
+    Color col = c;
+    if (px <= 0) { // unregistered or degenerate: loud, deterministic
+        px = 10;
+        inflate = 0;
+        col = {1, 0, 1, 1};
+    }
+    const float adv = 0.5f * px;
+    const float top = pen.y - 0.8f * px + 0.1f * px;
     const float cellW = 0.85f * adv;
-    const float cellH = 0.75f * f.px;
+    const float cellH = 0.75f * px;
     for (size_t i = 0; i < str.size(); ++i) {
-        const float a01 =
-            0.4f + 0.4f * hash01(static_cast<uint8_t>(str[i]), f.face);
-        const Rect cell{pen.x + static_cast<float>(i) * adv, top, cellW, cellH};
-        fill(cell, faded(c, a01), clip);
+        const float a01 = 0.4f + 0.4f * hash01(static_cast<uint8_t>(str[i]), f);
+        const Rect cell{pen.x + static_cast<float>(i) * adv - inflate,
+                        top - inflate, cellW + 2 * inflate, cellH + 2 * inflate};
+        fill(cell, faded(col, a01), clip);
     }
 }
 

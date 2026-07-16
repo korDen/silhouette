@@ -45,6 +45,15 @@ struct TextureData {
     uint32_t width = 0, height = 0;
 };
 
+// What the cheap sink knows about a registered font: the pixel size its
+// synthetic metrics derive from, and the declared outline stroke radius
+// (0 = the font has no pre-stroked variants; producers then fall back to
+// offset under-passes). Richer backends register real face data instead.
+struct FontDesc {
+    float px = 0;
+    float strokeWidth = 0;
+};
+
 enum class TextureMode { kReal, kSynthetic };
 
 class CheapRaster {
@@ -55,6 +64,12 @@ class CheapRaster {
     // them (registration is allowed and ignored).
     void set_texture(TextureId id, TextureData t) { textures_[id] = t; }
 
+    // Register or replace a font id. Both texture modes use fonts: metrics
+    // and text cells derive from the registered px, and outline_width
+    // reports the registered stroke radius so producers take the same
+    // stroked-vs-fallback branch they would against a real backend.
+    void set_font(FontId id, FontDesc d) { fonts_[id] = d; }
+
     // ---- Sink concept ------------------------------------------------
     void frame_begin(uint32_t w, uint32_t h, Color clear);
     void quad(Rect dst, Color c, Rect clip);
@@ -62,25 +77,33 @@ class CheapRaster {
                TextureId mask, Rect clip);
     void sweep(Rect dst, Color c, float a0, float a1, float frac, Rect clip);
     // Synthetic text: one run of per-byte cells at a baseline-left pen.
-    // Normative layout, all in pixels (pinned by tests — changing any
-    // constant is a breaking change to the equivalence gate):
+    // Normative layout, all in pixels of the REGISTERED font size (pinned
+    // by tests — changing any constant is a breaking change to the
+    // equivalence gate):
     //   cell i = { pen.x + i*advance, pen.y - ascent + 0.1*px,
     //              0.85*advance, 0.75*px }
-    //   fill   = color with alpha scaled by 0.4 + 0.4*hash01(byte, f.face)
-    // Alignment and decorations (shadows, outlines) are producer-side
-    // patterns over measure()/ascent(), not primitive properties. The
-    // string is borrowed only for this call.
-    void text(Vec2 pen, std::string_view s, Font f, Color c, Rect clip);
+    //   fill   = color with alpha scaled by 0.4 + 0.4*hash01(byte, f)
+    //   stroked: every cell inflates by the registered strokeWidth on all
+    //            sides — same pen advances, fatter coverage.
+    // An unregistered (or degenerate px<=0) font draws loud magenta cells
+    // at a fixed 10px so the failure is impossible to miss. Alignment and
+    // decorations are producer-side patterns over the font surface, not
+    // primitive properties. The string is borrowed only for this call.
+    void text(Vec2 pen, std::string_view s, FontId f, Color c, Rect clip,
+              bool stroked);
     void frame_end() {}
 
-    // Synthetic metrics — no font backend, a pure function of the Font.
-    // Normative: producers lay out against these, and both sides of any
-    // comparison see the same values.
-    float measure(Font f, std::string_view s) const {
-        return 0.5f * f.px * static_cast<float>(s.size()); // advance = 0.5*px/byte
+    // The font surface — synthetic metrics, normative pure functions of
+    // the registered px. Unregistered fonts answer 0 everywhere.
+    float measure(FontId f, std::string_view s) const {
+        return 0.5f * px_of(f) * static_cast<float>(s.size()); // 0.5*px/byte
     }
-    float ascent(Font f) const { return 0.8f * f.px; }
-    float line_height(Font f) const { return 1.25f * f.px; }
+    float ascent(FontId f) const { return 0.8f * px_of(f); }
+    float line_height(FontId f) const { return 1.25f * px_of(f); }
+    float outline_width(FontId f) const {
+        const auto it = fonts_.find(f);
+        return it == fonts_.end() ? 0.0f : it->second.strokeWidth;
+    }
 
     // ---- Result ------------------------------------------------------
     uint32_t width() const { return w_; }
@@ -91,9 +114,14 @@ class CheapRaster {
   private:
     void fill(Rect dst, Color c, Rect clip); // solid, src-over (quad + text cells)
     void blend_px(int x, int y, float r, float g, float b, float a, uint32_t mode);
+    float px_of(FontId f) const {
+        const auto it = fonts_.find(f);
+        return it == fonts_.end() ? 0.0f : it->second.px;
+    }
 
     TextureMode mode_;
     ankerl::unordered_dense::map<TextureId, TextureData> textures_;
+    ankerl::unordered_dense::map<FontId, FontDesc> fonts_;
     std::vector<uint8_t> buf_;
     uint32_t w_ = 0, h_ = 0;
 };

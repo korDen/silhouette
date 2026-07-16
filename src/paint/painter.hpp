@@ -22,19 +22,25 @@
 //   void  image(Rect dst, TextureId t, Rect uv, Color tint, uint32_t flags,
 //               TextureId mask, Rect clip);
 //   void  sweep(Rect dst, Color c, float a0, float a1, float frac, Rect clip);
-//   void  text (Vec2 pen, std::string_view s, Font f, Color c, Rect clip);
+//   void  text (Vec2 pen, std::string_view s, FontId f, Color c, Rect clip,
+//               bool stroked);
 //   void  frame_end();
-//   // metrics — the sink owns its fonts, so it answers layout questions:
-//   float measure(Font f, std::string_view s) const;  // run advance width
-//   float ascent(Font f) const;                       // baseline from cell top
-//   float line_height(Font f) const;                  // default line cell
+//   // the font surface — the sink owns its fonts (registered by id, like
+//   // textures), so it answers every layout question a producer has:
+//   float measure(FontId f, std::string_view s) const; // run advance width
+//   float ascent(FontId f) const;                      // baseline from cell top
+//   float line_height(FontId f) const;                 // default line cell
+//   float outline_width(FontId f) const;               // stroke radius; 0 = none
 //
 // text() is deliberately minimal: ONE run of glyphs at a baseline-left pen
-// position in one color. Everything a "label" bundles on top of that is a
+// position in one color. `stroked` selects the font's pre-stroked glyph
+// variants (same pen advances, fatter coverage) — the outline pass, real
+// only where outline_width() > 0. Everything else a "label" bundles is a
 // producer-side pattern, not a primitive property:
 //   - alignment/centering  = arithmetic over measure()/line_height()
 //   - a drop shadow        = the same run drawn first at +offset in another color
-//   - an outline           = the same, at several offsets
+//   - an outline           = a stroked under-pass, or offset copies where the
+//                            font declares no stroker
 // Keeping those out of the sink keeps every backend's text path a straight
 // line, and keeps host-specific layout rules (baseline conventions, cell
 // rounding) in the host where they belong.
@@ -54,13 +60,10 @@ namespace ui {
 // Opaque texture identity, host-assigned. 0 = none.
 using TextureId = unsigned int;
 
-// Font identity + pixel size. `face` is host-assigned and opaque; sinks
-// resolve it against their own font resources (the cheap rasterizer needs
-// none — it derives synthetic metrics from `px` alone).
-struct Font {
-    unsigned int face = 0;
-    float px = 0;
-};
+// Opaque font identity, host-assigned — one id per (face, size, stroker)
+// combination, i.e. per named font resource. Sinks resolve it against their own
+// registered font resources; producers never see face data.
+using FontId = unsigned int;
 
 // image() flags: blend mode in bits 0..1, modifier bits above. The blend
 // vocabulary is the fixed-function set the GPU backends will select
@@ -141,16 +144,20 @@ class Painter {
     }
 
     // `pen` is the run's baseline-left origin. The string is borrowed for
-    // the duration of the call.
-    void text(Vec2 pen, std::string_view s, Font f, Color c) {
-        sink_.text(pen + offset_, s, f, faded(c, alpha_), clip_);
+    // the duration of the call. stroked=true draws the font's pre-stroked
+    // glyph variants with the same pen advances (the outline under-pass).
+    void text(Vec2 pen, std::string_view s, FontId f, Color c,
+              bool stroked = false) {
+        sink_.text(pen + offset_, s, f, faded(c, alpha_), clip_, stroked);
     }
 
-    // Metrics pass through to the sink so a producer holding only the
-    // painter can place text (centering, right-alignment, fit-to-text).
-    float measure(Font f, std::string_view s) const { return sink_.measure(f, s); }
-    float ascent(Font f) const { return sink_.ascent(f); }
-    float line_height(Font f) const { return sink_.line_height(f); }
+    // The font surface passes through to the sink so a producer holding
+    // only the painter can place text (centering, right-alignment,
+    // fit-to-text, stroked-or-fallback outlines).
+    float measure(FontId f, std::string_view s) const { return sink_.measure(f, s); }
+    float ascent(FontId f) const { return sink_.ascent(f); }
+    float line_height(FontId f) const { return sink_.line_height(f); }
+    float outline_width(FontId f) const { return sink_.outline_width(f); }
 
   private:
     static constexpr int kDepth = 32; // deepest real UI trees sit well under this

@@ -29,7 +29,8 @@ struct Call {
     // text
     Vec2 pen{};
     std::string str; // copied during the call — the string is only borrowed
-    Font font{};
+    FontId font = 0;
+    bool stroked = false;
     // frame
     unsigned int w = 0, h = 0;
 };
@@ -77,24 +78,27 @@ struct RecordingSink {
         c.clip = clip;
         calls.push_back(c);
     }
-    void text(Vec2 pen, std::string_view s, Font f, Color col, Rect clip) {
+    void text(Vec2 pen, std::string_view s, FontId f, Color col, Rect clip,
+              bool stroked) {
         Call c;
         c.kind = Call::kText;
         c.pen = pen;
         c.str = std::string(s); // consume before returning
         c.font = f;
+        c.stroked = stroked;
         c.color = col;
         c.clip = clip;
         calls.push_back(c);
     }
-    // Metrics — a sink answers layout questions from its own font world;
-    // this one answers with recognizable constants so passthrough is
-    // pinnable.
-    float measure(Font f, std::string_view s) const {
-        return f.px * static_cast<float>(s.size());
+    // The font surface — a sink answers layout questions from its own font
+    // world; this one answers with recognizable formulas of the id so
+    // passthrough is pinnable.
+    float measure(FontId f, std::string_view s) const {
+        return static_cast<float>(f) * static_cast<float>(s.size());
     }
-    float ascent(Font f) const { return f.px * 2; }
-    float line_height(Font f) const { return f.px * 3; }
+    float ascent(FontId f) const { return static_cast<float>(f) * 2; }
+    float line_height(FontId f) const { return static_cast<float>(f) * 3; }
+    float outline_width(FontId f) const { return static_cast<float>(f) * 0.5f; }
     void frame_end() {
         Call c;
         c.kind = Call::kFrameEnd;
@@ -155,23 +159,26 @@ TEST_F(PainterTest, AlphaNestsMultiplicatively) {
     EXPECT_FLOAT_EQ(last().color.a, 1.0f);
 }
 
-TEST_F(PainterTest, TextForwardsPenAlphaAndOffset) {
+TEST_F(PainterTest, TextForwardsPenAlphaOffsetAndStroke) {
     p.push_offset({10, 20});
     p.push_alpha(0.5f);
-    p.text({3, 4}, "hi", Font{7, 9}, {1, 1, 1, 0.8f});
+    p.text({3, 4}, "hi", 7, {1, 1, 1, 0.8f});
     p.pop_alpha();
     p.pop_offset();
     EXPECT_EQ(last().kind, Call::kText);
     EXPECT_TRUE(last().pen == (Vec2{13, 24})); // offset folds into the pen
     EXPECT_FLOAT_EQ(last().color.a, 0.4f);     // group alpha folds into color
-    EXPECT_EQ(last().font.face, 7u);
-    EXPECT_FLOAT_EQ(last().font.px, 9.0f);
+    EXPECT_EQ(last().font, 7u);
+    EXPECT_FALSE(last().stroked); // the default is the plain variant
+    p.text({3, 4}, "hi", 7, {1, 1, 1, 1}, /*stroked=*/true);
+    EXPECT_TRUE(last().stroked);
 }
 
-TEST_F(PainterTest, MetricsPassThroughToTheSink) {
-    EXPECT_FLOAT_EQ(p.measure(Font{1, 8}, "abc"), 24.0f); // px * bytes
-    EXPECT_FLOAT_EQ(p.ascent(Font{1, 8}), 16.0f);
-    EXPECT_FLOAT_EQ(p.line_height(Font{1, 8}), 24.0f);
+TEST_F(PainterTest, FontSurfacePassesThroughToTheSink) {
+    EXPECT_FLOAT_EQ(p.measure(2, "abc"), 6.0f); // id * bytes
+    EXPECT_FLOAT_EQ(p.ascent(2), 4.0f);
+    EXPECT_FLOAT_EQ(p.line_height(2), 6.0f);
+    EXPECT_FLOAT_EQ(p.outline_width(2), 1.0f);
 }
 
 TEST_F(PainterTest, ClipIntersectsInTranslatedSpace) {
@@ -217,9 +224,9 @@ TEST_F(PainterTest, TextIsBorrowedOnlyDuringTheCall) {
     // The sprintf pattern the contract exists for: the same buffer, reused.
     char buf[16];
     std::snprintf(buf, sizeof buf, "hello");
-    p.text({0, 8}, buf, Font{1, 8}, {});
+    p.text({0, 8}, buf, 1, {});
     std::snprintf(buf, sizeof buf, "world");
-    p.text({0, 8}, buf, Font{1, 8}, {});
+    p.text({0, 8}, buf, 1, {});
     ASSERT_EQ(sink.calls.size(), 3u); // frame_begin + 2 texts
     EXPECT_EQ(sink.calls[1].str, "hello");
     EXPECT_EQ(sink.calls[2].str, "world");

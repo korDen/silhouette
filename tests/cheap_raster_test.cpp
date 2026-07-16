@@ -347,13 +347,15 @@ TEST(CheapRasterSweep, FullAndZeroFractions) {
 
 // ---- text ---------------------------------------------------------------------
 
+// Font 1 is registered as px=8 (no stroker) unless a test says otherwise.
 // The normative layout for px=8 at pen (2,10): advance 4, ascent 6.4, cell i
 // = {2 + i*4, 4.4, 3.4, 6} — cell 0 covers pixel centers x 2..4, y 4..9;
 // cell 1 starts at x 6, leaving column 5 empty between cells.
 TEST(CheapRasterText, CellsLandAtThePen) {
     CheapRaster r;
+    r.set_font(1, {8, 0});
     r.frame_begin(16, 16, kBlack);
-    r.text({2, 10}, "AB", Font{1, 8}, kWhite, kNoClip);
+    r.text({2, 10}, "AB", 1, kWhite, kNoClip, false);
     r.frame_end();
     EXPECT_NE(px(r, 3, 6), (std::array<int, 3>{0, 0, 0}));  // inside cell 0
     EXPECT_EQ(px(r, 5, 6), (std::array<int, 3>{0, 0, 0}));  // the gap between cells
@@ -366,8 +368,9 @@ TEST(CheapRasterText, CellsLandAtThePen) {
 TEST(CheapRasterText, PenMovesTheRun) {
     auto render = [](Vec2 pen) {
         CheapRaster r;
+        r.set_font(1, {8, 0});
         r.frame_begin(32, 16, kBlack);
-        r.text(pen, "A", Font{1, 8}, kWhite, kNoClip);
+        r.text(pen, "A", 1, kWhite, kNoClip, false);
         r.frame_end();
         return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
     };
@@ -379,8 +382,9 @@ TEST(CheapRasterText, PenMovesTheRun) {
 TEST(CheapRasterText, ContentChangesPixels) {
     auto render = [](const char* s) {
         CheapRaster r;
+        r.set_font(1, {8, 0});
         r.frame_begin(32, 16, kBlack);
-        r.text({0, 10}, s, Font{1, 8}, kWhite, kNoClip);
+        r.text({0, 10}, s, 1, kWhite, kNoClip, false);
         r.frame_end();
         return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
     };
@@ -390,40 +394,75 @@ TEST(CheapRasterText, ContentChangesPixels) {
 }
 
 TEST(CheapRasterText, FontIdentityAndSizeMatter) {
-    auto render = [](Font f) {
+    auto render = [](FontId id, float pxSize) {
         CheapRaster r;
+        r.set_font(id, {pxSize, 0});
         r.frame_begin(32, 16, kBlack);
-        r.text({0, 12}, "A", f, kWhite, kNoClip);
+        r.text({0, 12}, "A", id, kWhite, kNoClip, false);
         r.frame_end();
         return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
     };
-    EXPECT_NE(render(Font{1, 8}), render(Font{2, 8}));  // face seeds the hash
-    EXPECT_NE(render(Font{1, 8}), render(Font{1, 12})); // px scales the cells
+    EXPECT_NE(render(1, 8), render(2, 8));  // the id seeds the cell hash
+    EXPECT_NE(render(1, 8), render(1, 12)); // px scales the cells
 }
 
-TEST(CheapRasterText, MetricsAreTheNormativeFormulas) {
-    const CheapRaster r;
-    EXPECT_FLOAT_EQ(r.measure(Font{1, 8}, "abcd"), 16.0f); // 0.5 * 8 * 4
-    EXPECT_FLOAT_EQ(r.measure(Font{1, 8}, ""), 0.0f);
-    EXPECT_FLOAT_EQ(r.ascent(Font{1, 8}), 6.4f);       // 0.8 * 8
-    EXPECT_FLOAT_EQ(r.line_height(Font{1, 8}), 10.0f); // 1.25 * 8
+TEST(CheapRasterText, StrokedInflatesCellsAtTheSameAdvances) {
+    auto render = [](bool stroked) {
+        CheapRaster r;
+        r.set_font(1, {8, 1.5f}); // a declared stroker
+        r.frame_begin(16, 16, kBlack);
+        r.text({4, 10}, "A", 1, kWhite, kNoClip, stroked);
+        r.frame_end();
+        return r;
+    };
+    const CheapRaster plain = render(false), fat = render(true);
+    // The plain cell is {4, 4.4, 3.4, 6}; stroked inflates by 1.5 on every
+    // side -> {2.5, 2.9, 6.4, 9}. Pixel (3,3) is stroked-only territory.
+    EXPECT_EQ(px(plain, 3, 3), (std::array<int, 3>{0, 0, 0}));
+    EXPECT_NE(px(fat, 3, 3), (std::array<int, 3>{0, 0, 0}));
+    // Both start their run at the same pen: the advance did not change.
+    EXPECT_NE(px(plain, 4, 6), (std::array<int, 3>{0, 0, 0}));
+    EXPECT_NE(px(fat, 4, 6), (std::array<int, 3>{0, 0, 0}));
 }
 
-TEST(CheapRasterText, EmptyAndSizelessAreNoops) {
+TEST(CheapRasterText, FontSurfaceIsTheNormativeFormulas) {
     CheapRaster r;
-    r.frame_begin(8, 8, kBlack);
-    r.text({0, 6}, "", Font{1, 8}, kWhite, kNoClip);
-    r.text({0, 6}, "A", Font{1, 0}, kWhite, kNoClip); // px = 0
+    r.set_font(1, {8, 0});
+    r.set_font(2, {8, 1.5f});
+    EXPECT_FLOAT_EQ(r.measure(1, "abcd"), 16.0f); // 0.5 * 8 * 4
+    EXPECT_FLOAT_EQ(r.measure(1, ""), 0.0f);
+    EXPECT_FLOAT_EQ(r.ascent(1), 6.4f);       // 0.8 * 8
+    EXPECT_FLOAT_EQ(r.line_height(1), 10.0f); // 1.25 * 8
+    EXPECT_FLOAT_EQ(r.outline_width(1), 0.0f);
+    EXPECT_FLOAT_EQ(r.outline_width(2), 1.5f); // the registered stroker
+    EXPECT_FLOAT_EQ(r.measure(9, "abcd"), 0.0f); // unregistered answers 0
+    EXPECT_FLOAT_EQ(r.outline_width(9), 0.0f);
+}
+
+TEST(CheapRasterText, EmptyIsANoopUnregisteredIsLoud) {
+    CheapRaster r;
+    r.set_font(1, {8, 0});
+    r.frame_begin(16, 16, kBlack);
+    r.text({0, 8}, "", 1, kWhite, kNoClip, false); // empty: nothing
     r.frame_end();
-    for (int y = 0; y < 8; ++y)
-        for (int x = 0; x < 8; ++x)
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x)
             EXPECT_EQ(px(r, x, y), (std::array<int, 3>{0, 0, 0}));
+    // An unregistered font cannot be silent: fixed-size magenta cells.
+    r.frame_begin(16, 16, kBlack);
+    r.text({2, 12}, "A", 42, kWhite, kNoClip, false);
+    r.frame_end();
+    const auto loud = px(r, 3, 8);
+    EXPECT_GT(loud[0], 0);
+    EXPECT_EQ(loud[1], 0);
+    EXPECT_GT(loud[2], 0);
 }
 
 TEST(CheapRasterText, ClipCutsCells) {
     CheapRaster r;
+    r.set_font(1, {8, 0});
     r.frame_begin(32, 8, kBlack);
-    r.text({0, 7}, "AAAA", Font{1, 8}, kWhite, Rect{0, 0, 6, 8});
+    r.text({0, 7}, "AAAA", 1, kWhite, Rect{0, 0, 6, 8}, false);
     r.frame_end();
     EXPECT_NE(px(r, 1, 3), (std::array<int, 3>{0, 0, 0}));
     for (int x = 6; x < 32; ++x) // everything past the clip is untouched

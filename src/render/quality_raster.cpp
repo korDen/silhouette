@@ -136,7 +136,8 @@ struct QualityRaster::FontWorld {
     }
 };
 
-QualityRaster::QualityRaster() : fonts_(std::make_unique<FontWorld>()) {}
+QualityRaster::QualityRaster(Sampler sampler)
+    : sampler_(sampler), fonts_(std::make_unique<FontWorld>()) {}
 QualityRaster::~QualityRaster() = default;
 
 void QualityRaster::set_font(FontId id, const QualityFontDesc& d) {
@@ -279,21 +280,41 @@ void QualityRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
             missing = true;
     }
 
-    // Trilinear level selection from the UV footprint in BASE texels per
-    // destination pixel (the larger axis governs).
+    // Level selection from the UV footprint in BASE texels per destination
+    // pixel. Isotropic (maxAniso 1): the larger axis governs. Anisotropic:
+    // the level comes from the minor axis and `taps` trilinear samples
+    // integrate the major axis across one pixel's footprint — each tap then
+    // covers major/taps ≈ minor texels, so a one-axis-minified draw keeps
+    // the other axis at full detail (the hardware ANISOTROPIC model for
+    // unrotated quads). lodBias applies after, clamped at the sharp end.
     int l0 = 0, l1 = 0;
     float lfrac = 0;
+    int taps = 1;
+    bool tapsAlongU = true;
     if (tex != nullptr) {
         const MipTexture::Level& base = tex->levels.front();
-        const float tpx = std::abs(uv.w) * (float)base.w / dst.w;
-        const float tpy = std::abs(uv.h) * (float)base.h / dst.h;
-        const float t2 = std::max(1.0f, std::max(tpx, tpy));
-        const float lambda = std::log2(t2);
+        const float tpx =
+            std::max(1.0f, std::abs(uv.w) * (float)base.w / dst.w);
+        const float tpy =
+            std::max(1.0f, std::abs(uv.h) * (float)base.h / dst.h);
+        const float major = std::max(tpx, tpy);
+        const float minor = std::min(tpx, tpy);
+        tapsAlongU = tpx >= tpy;
+        if (sampler_.maxAniso > 1) {
+            const float ratio =
+                std::min((float)sampler_.maxAniso, major / minor);
+            taps = std::max(1, (int)std::ceil(ratio - 1e-4f));
+        }
+        const float lambda = std::max(
+            0.0f, std::log2(major / (float)taps) + sampler_.lodBias);
         l0 = std::min((int)tex->levels.size() - 1, (int)std::floor(lambda));
         l1 = std::min((int)tex->levels.size() - 1, l0 + 1);
         lfrac = std::min(1.0f, std::max(0.0f, lambda - (float)l0));
         if (l0 == l1) lfrac = 0;
     }
+    // One destination pixel's footprint in UV, for the tap offsets.
+    const float stepU = uv.w / dst.w;
+    const float stepV = uv.h / dst.h;
 
     for (int y = s.y0; y < s.y1; ++y) {
         const float fy = ((float)y + 0.5f - dst.y) / dst.h;
@@ -308,17 +329,34 @@ void QualityRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
             } else if (missing) {
                 src = {1, 0, 1, 1}; // loud magenta
             } else {
-                const MipTexture::Level& a = tex->levels[(size_t)l0];
-                src = sample_level(a.rgba, a.w, a.h, u, v, tileU, tileV);
-                if (lfrac > 0) {
-                    const MipTexture::Level& b = tex->levels[(size_t)l1];
-                    const Rgba s1 =
-                        sample_level(b.rgba, b.w, b.h, u, v, tileU, tileV);
-                    src.r += (s1.r - src.r) * lfrac;
-                    src.g += (s1.g - src.g) * lfrac;
-                    src.b += (s1.b - src.b) * lfrac;
-                    src.a += (s1.a - src.a) * lfrac;
+                src = {0, 0, 0, 0};
+                for (int i = 0; i < taps; ++i) {
+                    const float off =
+                        ((float)i + 0.5f) / (float)taps - 0.5f;
+                    const float tu = tapsAlongU ? u + off * stepU : u;
+                    const float tv = tapsAlongU ? v : v + off * stepV;
+                    const MipTexture::Level& a = tex->levels[(size_t)l0];
+                    Rgba tap =
+                        sample_level(a.rgba, a.w, a.h, tu, tv, tileU, tileV);
+                    if (lfrac > 0) {
+                        const MipTexture::Level& b = tex->levels[(size_t)l1];
+                        const Rgba s1 = sample_level(b.rgba, b.w, b.h, tu,
+                                                     tv, tileU, tileV);
+                        tap.r += (s1.r - tap.r) * lfrac;
+                        tap.g += (s1.g - tap.g) * lfrac;
+                        tap.b += (s1.b - tap.b) * lfrac;
+                        tap.a += (s1.a - tap.a) * lfrac;
+                    }
+                    src.r += tap.r;
+                    src.g += tap.g;
+                    src.b += tap.b;
+                    src.a += tap.a;
                 }
+                const float inv = 1.0f / (float)taps;
+                src.r *= inv;
+                src.g *= inv;
+                src.b *= inv;
+                src.a *= inv;
             }
 
             src.a *= mask_alpha(mask, fx, fy);

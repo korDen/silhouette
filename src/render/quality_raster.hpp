@@ -28,7 +28,20 @@ namespace ui {
 
 class QualityRaster {
   public:
-    QualityRaster();
+    // Mip sampling configuration — GPU sampler-state semantics, fixed for
+    // the sink's lifetime. lodBias adds to the computed level (negative =
+    // sharper; the D3D/Vulkan mipLodBias). maxAniso > 1 enables axis-
+    // aligned anisotropy for these unrotated quads: the level comes from
+    // the MINOR footprint axis and up to maxAniso trilinear taps integrate
+    // the MAJOR axis — a draw minified on one axis only keeps full texel
+    // detail on the other, exactly like hardware ANISOTROPIC filtering.
+    // The default {0, 1} is plain isotropic trilinear.
+    struct Sampler {
+        float lodBias = 0;
+        int maxAniso = 1;
+    };
+
+    explicit QualityRaster(Sampler sampler = {});
     ~QualityRaster();
     QualityRaster(const QualityRaster&) = delete;
     QualityRaster& operator=(const QualityRaster&) = delete;
@@ -116,6 +129,7 @@ class QualityRaster {
     std::vector<float> canvas_; // RGB float, per-op clamped
     std::vector<uint8_t> out_;  // RGBA8, filled at frame_end
     uint32_t w_ = 0, h_ = 0;
+    Sampler sampler_;
 
     struct FontWorld; // faces/shaping/coverage; mutable: the font surface
                       // is a const query that fills shaping scratch and

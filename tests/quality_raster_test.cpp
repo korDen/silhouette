@@ -179,6 +179,96 @@ TEST(QualityImage, FlipsTilesAndSubrects) {
     EXPECT_EQ(px(r, 2, 2)[0], 255);
 }
 
+// 4x4, horizontal stripes varying in v: rows 0-1 white, rows 2-3 black.
+// Mips: level1 rows = white|black, level2 = 0.5 gray.
+std::vector<uint8_t> hstripes() {
+    std::vector<uint8_t> t(4 * 4 * 4, 0);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+            uint8_t* p = &t[(size_t)(y * 4 + x) * 4];
+            p[0] = p[1] = p[2] = y < 2 ? 255 : 0;
+            p[3] = 255;
+        }
+    return t;
+}
+
+TEST(QualitySampler, AnisoKeepsTheUnminifiedAxis) {
+    // dst 1x4 from 4x4: footprint 4 texels/px in u, 1:1 in v. Isotropic
+    // trilinear takes level 2 (flat 0.5 gray). Aniso derives the level from
+    // the MINOR axis (v, 1:1 -> level 0) and integrates u with 4 taps at
+    // u = .125/.375/.625/.875 (exact texel centers): each row keeps its own
+    // color — the one-axis-minified sharpness hardware aniso gives.
+    const std::vector<uint8_t> t = hstripes();
+    QualityRaster iso;
+    iso.set_texture(1, t.data(), 4, 4);
+    iso.frame_begin(1, 4, kBlack);
+    iso.image({0, 0, 1, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    iso.frame_end();
+    for (int y = 0; y < 4; ++y)
+        EXPECT_EQ(px(iso, 0, y), (std::array<int, 3>{128, 128, 128})) << y;
+
+    QualityRaster an(QualityRaster::Sampler{0.0f, 16});
+    an.set_texture(1, t.data(), 4, 4);
+    an.frame_begin(1, 4, kBlack);
+    an.image({0, 0, 1, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    an.frame_end();
+    EXPECT_EQ(px(an, 0, 0), (std::array<int, 3>{255, 255, 255}));
+    EXPECT_EQ(px(an, 0, 1), (std::array<int, 3>{255, 255, 255}));
+    EXPECT_EQ(px(an, 0, 2), (std::array<int, 3>{0, 0, 0}));
+    EXPECT_EQ(px(an, 0, 3), (std::array<int, 3>{0, 0, 0}));
+}
+
+TEST(QualitySampler, AnisoStillIntegratesTheMinifiedAxis) {
+    // Vertical stripes: col 0 white, cols 1-3 black. The same 1x4 aniso
+    // draw taps texels 0..3 across u -> every row averages to 0.25 (64).
+    // A single center tap at level 0 would give 0 (cols 1|2) — the taps
+    // must cover the footprint, not just sharpen.
+    std::vector<uint8_t> t(4 * 4 * 4, 0);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+            uint8_t* p = &t[(size_t)(y * 4 + x) * 4];
+            p[0] = p[1] = p[2] = x == 0 ? 255 : 0;
+            p[3] = 255;
+        }
+    QualityRaster an(QualityRaster::Sampler{0.0f, 16});
+    an.set_texture(1, t.data(), 4, 4);
+    an.frame_begin(1, 4, kBlack);
+    an.image({0, 0, 1, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    an.frame_end();
+    for (int y = 0; y < 4; ++y)
+        EXPECT_EQ(px(an, 0, y), (std::array<int, 3>{64, 64, 64})) << y;
+}
+
+TEST(QualitySampler, LodBiasShiftsTheLevel) {
+    const std::vector<uint8_t> t = hstripes();
+    // Sharper: the 1x4 draw's isotropic level 2 biased by -2 lands on
+    // level 0 — one center tap per row (u=.5 -> cols 1|2, rows uniform)
+    // recovers the stripe colors.
+    QualityRaster sharp(QualityRaster::Sampler{-2.0f, 1});
+    sharp.set_texture(1, t.data(), 4, 4);
+    sharp.frame_begin(1, 4, kBlack);
+    sharp.image({0, 0, 1, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    sharp.frame_end();
+    EXPECT_EQ(px(sharp, 0, 0), (std::array<int, 3>{255, 255, 255}));
+    EXPECT_EQ(px(sharp, 0, 3), (std::array<int, 3>{0, 0, 0}));
+
+    // Blurrier: a 1:1 draw biased +1 samples level 1 (rows white|black):
+    // dst y=1 (v=.375) -> level-1 vy=.25 -> .75*white+.25*black = 191,
+    // where level 0 gives the exact row-1 texel, pure white.
+    QualityRaster blur(QualityRaster::Sampler{1.0f, 1});
+    blur.set_texture(1, t.data(), 4, 4);
+    blur.frame_begin(4, 4, kBlack);
+    blur.image({0, 0, 4, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    blur.frame_end();
+    EXPECT_EQ(px(blur, 0, 1), (std::array<int, 3>{191, 191, 191}));
+    QualityRaster plain;
+    plain.set_texture(1, t.data(), 4, 4);
+    plain.frame_begin(4, 4, kBlack);
+    plain.image({0, 0, 4, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    plain.frame_end();
+    EXPECT_EQ(px(plain, 0, 1), (std::array<int, 3>{255, 255, 255}));
+}
+
 TEST(QualitySweep, QuadrantAndMask) {
     QualityRaster r;
     r.frame_begin(8, 8, kBlack);

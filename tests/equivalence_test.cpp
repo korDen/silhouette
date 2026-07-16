@@ -25,7 +25,7 @@ TEST(PixelMatch, IdenticalStreamsMatch) {
     auto draw = [](Painter<CheapRaster>& p) {
         p.image({1, 1, 6, 6}, 7);
         p.quad({8, 8, 4, 4}, {1, 0, 0, 1});
-        p.text({0, 10, 16, 6}, "42", Font{1, 6}, {}, {1, 1, 1, 1});
+        p.text({1, 14}, "42", Font{1, 6}, {1, 1, 1, 1});
     };
     const auto a = render(draw), b = render(draw);
     const PixelDiff d = match_pixels(a, b);
@@ -102,12 +102,31 @@ TEST(PixelMatch, FlagAndMaskDifferencesAreDetectedTextureFree) {
 
 TEST(PixelMatch, TextDifferencesAreDetected) {
     const auto a = render([](Painter<CheapRaster>& p) {
-        p.text({0, 0, 16, 8}, "10", Font{1, 8}, {}, {1, 1, 1, 1});
+        p.text({1, 8}, "10", Font{1, 8}, {1, 1, 1, 1});
     });
     const auto b = render([](Painter<CheapRaster>& p) {
-        p.text({0, 0, 16, 8}, "16", Font{1, 8}, {}, {1, 1, 1, 1});
+        p.text({1, 8}, "16", Font{1, 8}, {1, 1, 1, 1});
     });
     EXPECT_FALSE(match_pixels(a, b).equal());
+}
+
+TEST(PixelMatch, DecorationsAreProducerPatterns) {
+    // A drop shadow is nothing but the same run drawn first, offset, in
+    // another color — so two producers writing the pattern independently
+    // match, and dropping the under-pass is detected.
+    // (The shadow must be a color that shows on the black canvas — a black
+    // shadow on black is genuinely invisible, and the gate rightly calls
+    // streams with and without it equivalent.)
+    auto shadowed = [](Painter<CheapRaster>& p) {
+        p.text({3, 9}, "42", Font{1, 8}, {1, 0, 0, 1}); // the under-pass
+        p.text({2, 8}, "42", Font{1, 8}, {1, 1, 1, 1}); // the fill
+    };
+    const auto a = render(shadowed), b = render(shadowed);
+    EXPECT_TRUE(match_pixels(a, b).equal());
+    const auto noShadow = render([](Painter<CheapRaster>& p) {
+        p.text({2, 8}, "42", Font{1, 8}, {1, 1, 1, 1});
+    });
+    EXPECT_FALSE(match_pixels(a, noShadow).equal());
 }
 
 TEST(PixelMatch, SizeMismatchIsItsOwnVerdict) {

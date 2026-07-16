@@ -239,50 +239,22 @@ void CheapRaster::sweep(Rect dst, Color c, float a0, float a1, float frac,
     }
 }
 
-void CheapRaster::text(Rect dst, std::string_view str, Font f,
-                       const TextStyle& st, Color c, Rect clip) {
+void CheapRaster::text(Vec2 pen, std::string_view str, Font f, Color c,
+                       Rect clip) {
     if (str.empty() || f.px <= 0) return;
     // The normative synthetic layout — see the header. Pinned by tests.
+    // One run at the baseline-left pen; decorations (shadows, outlines) and
+    // alignment are producer-side patterns built on measure()/ascent().
     const float adv = 0.5f * f.px;
-    const float runW = adv * static_cast<float>(str.size());
-    const float lineH = st.lineHeight > 0 ? st.lineHeight : 1.25f * f.px;
-
-    float x0 = dst.x;
-    if (st.align == kAlignCenter)
-        x0 += std::floor((dst.w - runW) / 2.0f);
-    else if (st.align == kAlignRight)
-        x0 += dst.w - runW;
-    float y0 = dst.y;
-    if (st.valign == kVAlignCenter)
-        y0 += std::floor((dst.h - lineH) / 2.0f);
-    else if (st.valign == kVAlignBottom)
-        y0 += dst.h - lineH;
-
-    const float cellY = y0 + 0.1f * f.px;
+    const float top = pen.y - ascent(f) + 0.1f * f.px;
     const float cellW = 0.85f * adv;
     const float cellH = 0.75f * f.px;
-
-    // A pass draws every byte's cell at one offset; under-passes (shadow,
-    // outline) go first so the fill composites on top, like real text.
-    auto pass = [&](float ox, float oy, Color base) {
-        for (size_t i = 0; i < str.size(); ++i) {
-            const float a01 =
-                0.4f + 0.4f * hash01(static_cast<uint8_t>(str[i]), f.face);
-            const Rect cell{x0 + static_cast<float>(i) * adv + ox, cellY + oy,
-                            cellW, cellH};
-            fill(cell, faded(base, a01), clip);
-        }
-    };
-
-    if (st.outline) {
-        const float o = st.offset;
-        const float dxs[8] = {-o, 0, o, -o, o, -o, 0, o};
-        const float dys[8] = {-o, -o, -o, 0, 0, o, o, o};
-        for (int k = 0; k < 8; ++k) pass(dxs[k], dys[k], st.shadowColor);
-    } else if (st.shadow) {
-        pass(st.offset, st.offset, st.shadowColor);
+    for (size_t i = 0; i < str.size(); ++i) {
+        const float a01 =
+            0.4f + 0.4f * hash01(static_cast<uint8_t>(str[i]), f.face);
+        const Rect cell{pen.x + static_cast<float>(i) * adv, top, cellW, cellH};
+        fill(cell, faded(c, a01), clip);
     }
-    pass(0, 0, c);
 }
 
 } // namespace ui

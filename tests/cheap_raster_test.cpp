@@ -347,38 +347,44 @@ TEST(CheapRasterSweep, FullAndZeroFractions) {
 
 // ---- text ---------------------------------------------------------------------
 
-// The normative layout for px=8: advance 4, cells at x0+i*4, cell rect
-// {x0+i*4, y0+0.8, 3.4, 6}.
-TEST(CheapRasterText, LeftAlignedCellsLandWhereTheFormulaSays) {
+// The normative layout for px=8 at pen (2,10): advance 4, ascent 6.4, cell i
+// = {2 + i*4, 4.4, 3.4, 6} — cell 0 covers pixel centers x 2..4, y 4..9;
+// cell 1 starts at x 6, leaving column 5 empty between cells.
+TEST(CheapRasterText, CellsLandAtThePen) {
     CheapRaster r;
-    r.frame_begin(32, 8, kBlack);
-    r.text({0, 0, 32, 8}, "A", Font{1, 8}, {}, kWhite, kNoClip);
+    r.frame_begin(16, 16, kBlack);
+    r.text({2, 10}, "AB", Font{1, 8}, kWhite, kNoClip);
     r.frame_end();
-    EXPECT_NE(px(r, 1, 3), (std::array<int, 3>{0, 0, 0})); // inside the cell
-    EXPECT_EQ(px(r, 4, 3), (std::array<int, 3>{0, 0, 0})); // past cell width 3.4
-    EXPECT_EQ(px(r, 1, 7), (std::array<int, 3>{0, 0, 0})); // below cell bottom 6.8
+    EXPECT_NE(px(r, 3, 6), (std::array<int, 3>{0, 0, 0}));  // inside cell 0
+    EXPECT_EQ(px(r, 5, 6), (std::array<int, 3>{0, 0, 0}));  // the gap between cells
+    EXPECT_NE(px(r, 6, 6), (std::array<int, 3>{0, 0, 0}));  // inside cell 1
+    EXPECT_EQ(px(r, 3, 3), (std::array<int, 3>{0, 0, 0}));  // above the ascent
+    EXPECT_EQ(px(r, 3, 10), (std::array<int, 3>{0, 0, 0})); // below the run
+    EXPECT_EQ(px(r, 1, 6), (std::array<int, 3>{0, 0, 0}));  // left of the pen
 }
 
-TEST(CheapRasterText, RightAlignShiftsTheRun) {
-    CheapRaster r;
-    TextStyle st;
-    st.align = kAlignRight;
-    r.frame_begin(32, 8, kBlack);
-    r.text({0, 0, 32, 8}, "A", Font{1, 8}, st, kWhite, kNoClip);
-    r.frame_end();
-    EXPECT_EQ(px(r, 1, 3), (std::array<int, 3>{0, 0, 0}));  // left is empty now
-    EXPECT_NE(px(r, 29, 3), (std::array<int, 3>{0, 0, 0})); // run starts at 28
+TEST(CheapRasterText, PenMovesTheRun) {
+    auto render = [](Vec2 pen) {
+        CheapRaster r;
+        r.frame_begin(32, 16, kBlack);
+        r.text(pen, "A", Font{1, 8}, kWhite, kNoClip);
+        r.frame_end();
+        return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
+    };
+    EXPECT_NE(render({2, 10}), render({3, 10})); // one pixel right
+    EXPECT_NE(render({2, 10}), render({2, 11})); // one pixel down
+    EXPECT_EQ(render({2, 10}), render({2, 10})); // determinism
 }
 
 TEST(CheapRasterText, ContentChangesPixels) {
     auto render = [](const char* s) {
         CheapRaster r;
-        r.frame_begin(32, 8, kBlack);
-        r.text({0, 0, 32, 8}, s, Font{1, 8}, {}, kWhite, kNoClip);
+        r.frame_begin(32, 16, kBlack);
+        r.text({0, 10}, s, Font{1, 8}, kWhite, kNoClip);
         r.frame_end();
-        return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 8 * 4);
+        return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
     };
-    EXPECT_NE(render("AB"), render("AC")); // one byte differs -> pixels differ
+    EXPECT_NE(render("AB"), render("AC"));  // one byte differs -> pixels differ
     EXPECT_NE(render("AB"), render("ABC")); // length differs
     EXPECT_EQ(render("AB"), render("AB"));  // determinism
 }
@@ -387,7 +393,7 @@ TEST(CheapRasterText, FontIdentityAndSizeMatter) {
     auto render = [](Font f) {
         CheapRaster r;
         r.frame_begin(32, 16, kBlack);
-        r.text({0, 0, 32, 16}, "A", f, {}, kWhite, kNoClip);
+        r.text({0, 12}, "A", f, kWhite, kNoClip);
         r.frame_end();
         return std::vector<uint8_t>(r.pixels(), r.pixels() + 32 * 16 * 4);
     };
@@ -395,69 +401,19 @@ TEST(CheapRasterText, FontIdentityAndSizeMatter) {
     EXPECT_NE(render(Font{1, 8}), render(Font{1, 12})); // px scales the cells
 }
 
-TEST(CheapRasterText, ShadowDrawsUnderAtOffset) {
-    CheapRaster r;
-    TextStyle st;
-    st.shadow = true;
-    st.offset = 2;
-    st.shadowColor = {1, 0, 0, 1};
-    r.frame_begin(32, 12, kBlack);
-    r.text({0, 0, 32, 12}, "A", Font{1, 8}, st, kWhite, kNoClip);
-    r.frame_end();
-    // Cell spans x 0..3.4; the shadow spans 2..5.4. Pixel 4 is shadow-only:
-    // red present, green absent (the white fill never reached it).
-    auto shadowOnly = px(r, 4, 4);
-    EXPECT_GT(shadowOnly[0], 0);
-    EXPECT_EQ(shadowOnly[1], 0);
-}
-
-TEST(CheapRasterText, OutlineSurroundsTheFill) {
-    auto render = [](bool outline) {
-        CheapRaster r;
-        TextStyle st;
-        st.outline = outline;
-        st.offset = 1;
-        st.shadowColor = {1, 0, 0, 1};
-        r.frame_begin(16, 12, kBlack);
-        r.text({2, 2, 12, 8}, "A", Font{1, 8}, st, kWhite, kNoClip);
-        r.frame_end();
-        return std::vector<uint8_t>(r.pixels(), r.pixels() + 16 * 12 * 4);
-    };
-    const auto with = render(true), without = render(false);
-    EXPECT_NE(with, without);
-    // above-left of the cell only the outline pass paints
-    CheapRaster r;
-    TextStyle st;
-    st.outline = true;
-    st.offset = 1;
-    st.shadowColor = {1, 0, 0, 1};
-    r.frame_begin(16, 12, kBlack);
-    r.text({2, 2, 12, 8}, "A", Font{1, 8}, st, kWhite, kNoClip);
-    r.frame_end();
-    EXPECT_GT(px(r, 2, 2)[0], 0); // (2,2): outline offset -1,-1 territory
-}
-
-TEST(CheapRasterText, CenterAlignAndLineHeightPlaceVertically) {
-    auto render = [](float lineHeight) {
-        CheapRaster r;
-        TextStyle st;
-        st.valign = kVAlignCenter;
-        st.lineHeight = lineHeight;
-        r.frame_begin(16, 32, kBlack);
-        r.text({0, 0, 16, 32}, "A", Font{1, 8}, st, kWhite, kNoClip);
-        r.frame_end();
-        return std::vector<uint8_t>(r.pixels(), r.pixels() + 16 * 32 * 4);
-    };
-    // lineH 10 (default 1.25*8) centers at y0=11; lineH 20 centers at y0=6 —
-    // different placements, pinned relative to each other.
-    EXPECT_NE(render(0), render(20));
+TEST(CheapRasterText, MetricsAreTheNormativeFormulas) {
+    const CheapRaster r;
+    EXPECT_FLOAT_EQ(r.measure(Font{1, 8}, "abcd"), 16.0f); // 0.5 * 8 * 4
+    EXPECT_FLOAT_EQ(r.measure(Font{1, 8}, ""), 0.0f);
+    EXPECT_FLOAT_EQ(r.ascent(Font{1, 8}), 6.4f);       // 0.8 * 8
+    EXPECT_FLOAT_EQ(r.line_height(Font{1, 8}), 10.0f); // 1.25 * 8
 }
 
 TEST(CheapRasterText, EmptyAndSizelessAreNoops) {
     CheapRaster r;
     r.frame_begin(8, 8, kBlack);
-    r.text({0, 0, 8, 8}, "", Font{1, 8}, {}, kWhite, kNoClip);
-    r.text({0, 0, 8, 8}, "A", Font{1, 0}, {}, kWhite, kNoClip); // px = 0
+    r.text({0, 6}, "", Font{1, 8}, kWhite, kNoClip);
+    r.text({0, 6}, "A", Font{1, 0}, kWhite, kNoClip); // px = 0
     r.frame_end();
     for (int y = 0; y < 8; ++y)
         for (int x = 0; x < 8; ++x)
@@ -467,7 +423,7 @@ TEST(CheapRasterText, EmptyAndSizelessAreNoops) {
 TEST(CheapRasterText, ClipCutsCells) {
     CheapRaster r;
     r.frame_begin(32, 8, kBlack);
-    r.text({0, 0, 32, 8}, "AAAA", Font{1, 8}, {}, kWhite, Rect{0, 0, 6, 8});
+    r.text({0, 7}, "AAAA", Font{1, 8}, kWhite, Rect{0, 0, 6, 8});
     r.frame_end();
     EXPECT_NE(px(r, 1, 3), (std::array<int, 3>{0, 0, 0}));
     for (int x = 6; x < 32; ++x) // everything past the clip is untouched

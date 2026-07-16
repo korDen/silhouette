@@ -17,19 +17,32 @@
 //
 // The Sink concept (statically bound; no virtuals on the hot path):
 //
-//   void frame_begin(uint32_t w, uint32_t h, Color clear);
-//   void quad (Rect dst, Color c, Rect clip);
-//   void image(Rect dst, TextureId t, Rect uv, Color tint, uint32_t flags,
-//              TextureId mask, Rect clip);
-//   void sweep(Rect dst, Color c, float a0, float a1, float frac, Rect clip);
-//   void text (Rect dst, std::string_view s, Font f, const TextStyle& st,
-//              Color c, Rect clip);
-//   void frame_end();
+//   void  frame_begin(uint32_t w, uint32_t h, Color clear);
+//   void  quad (Rect dst, Color c, Rect clip);
+//   void  image(Rect dst, TextureId t, Rect uv, Color tint, uint32_t flags,
+//               TextureId mask, Rect clip);
+//   void  sweep(Rect dst, Color c, float a0, float a1, float frac, Rect clip);
+//   void  text (Vec2 pen, std::string_view s, Font f, Color c, Rect clip);
+//   void  frame_end();
+//   // metrics — the sink owns its fonts, so it answers layout questions:
+//   float measure(Font f, std::string_view s) const;  // run advance width
+//   float ascent(Font f) const;                       // baseline from cell top
+//   float line_height(Font f) const;                  // default line cell
+//
+// text() is deliberately minimal: ONE run of glyphs at a baseline-left pen
+// position in one color. Everything a "label" bundles on top of that is a
+// producer-side pattern, not a primitive property:
+//   - alignment/centering  = arithmetic over measure()/line_height()
+//   - a drop shadow        = the same run drawn first at +offset in another color
+//   - an outline           = the same, at several offsets
+// Keeping those out of the sink keeps every backend's text path a straight
+// line, and keeps host-specific layout rules (baseline conventions, cell
+// rounding) in the host where they belong.
 //
 // Painter<S> is the one shared front-end over a sink: it owns the group
 // stacks (offset / alpha / clip), folds them, and forwards fully resolved
-// primitives (absolute rect, final alpha, absolute clip). Group math exists
-// exactly once, here; sinks stay straight-line code.
+// primitives (absolute coordinates, final alpha, absolute clip). Group math
+// exists exactly once, here; sinks stay straight-line code.
 #include "core/geometry.hpp"
 
 #include <cassert>
@@ -47,19 +60,6 @@ using TextureId = unsigned int;
 struct Font {
     unsigned int face = 0;
     float px = 0;
-};
-
-enum Align : unsigned char { kAlignLeft = 0, kAlignCenter = 1, kAlignRight = 2 };
-enum VAlign : unsigned char { kVAlignTop = 0, kVAlignCenter = 1, kVAlignBottom = 2 };
-
-struct TextStyle {
-    unsigned char align = kAlignLeft;
-    unsigned char valign = kVAlignTop;
-    bool shadow = false;  // one offset copy under the fill
-    bool outline = false; // eight offset copies under the fill
-    float offset = 1;     // shadow/outline offset, applied to both axes
-    Color shadowColor{0, 0, 0, 1};
-    float lineHeight = 0; // 0 = derive from the font size
 };
 
 // image() flags: blend mode in bits 0..1, modifier bits above. The blend
@@ -140,11 +140,17 @@ class Painter {
         sink_.sweep(r + offset_, faded(c, alpha_), a0, a1, frac, clip_);
     }
 
-    void text(Rect r, std::string_view s, Font f, const TextStyle& st, Color c) {
-        TextStyle st2 = st;
-        st2.shadowColor = faded(st.shadowColor, alpha_);
-        sink_.text(r + offset_, s, f, st2, faded(c, alpha_), clip_);
+    // `pen` is the run's baseline-left origin. The string is borrowed for
+    // the duration of the call.
+    void text(Vec2 pen, std::string_view s, Font f, Color c) {
+        sink_.text(pen + offset_, s, f, faded(c, alpha_), clip_);
     }
+
+    // Metrics pass through to the sink so a producer holding only the
+    // painter can place text (centering, right-alignment, fit-to-text).
+    float measure(Font f, std::string_view s) const { return sink_.measure(f, s); }
+    float ascent(Font f) const { return sink_.ascent(f); }
+    float line_height(Font f) const { return sink_.line_height(f); }
 
   private:
     static constexpr int kDepth = 32; // deepest real UI trees sit well under this

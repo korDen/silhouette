@@ -72,9 +72,12 @@ calls — and no larger:
   shape the quad is cut to, independent of the color UV).
 - **sweep** — radial progress wedge: angle range, covered fraction, flat
   color. Angles in degrees, 0° at 12 o'clock, positive clockwise.
-- **text** — string + font (opaque face id + pixel size) + style (align,
-  valign, shadow, outline, line height) + color. The string is call-duration
-  borrowed.
+- **text** — ONE run of glyphs at a baseline-left pen position: string
+  (call-duration borrowed) + font (opaque face id + pixel size) + color.
+  Deliberately minimal: alignment is producer arithmetic over the sink's
+  metrics (`measure` / `ascent` / `line_height`); a shadow is the same run
+  drawn first at an offset in another color; an outline is the same at
+  several offsets. Label semantics live in producers, not in backends.
 
 ## The render ladder (build order)
 

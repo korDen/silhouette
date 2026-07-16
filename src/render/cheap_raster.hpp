@@ -61,19 +61,26 @@ class CheapRaster {
     void image(Rect dst, TextureId t, Rect uv, Color tint, uint32_t flags,
                TextureId mask, Rect clip);
     void sweep(Rect dst, Color c, float a0, float a1, float frac, Rect clip);
-    // Synthetic text. Normative layout, all in pixels (pinned by tests —
-    // changing any constant is a breaking change to the equivalence gate):
-    //   advance = 0.5*px per byte;      runW  = advance * bytes
-    //   lineH   = st.lineHeight if > 0, else 1.25*px
-    //   x0 = dst.x + (left: 0 | center: floor((dst.w-runW)/2) | right: dst.w-runW)
-    //   y0 = dst.y + (top:  0 | center: floor((dst.h-lineH)/2) | bottom: dst.h-lineH)
-    //   cell i = { x0 + i*advance, y0 + 0.1*px, 0.85*advance, 0.75*px }
+    // Synthetic text: one run of per-byte cells at a baseline-left pen.
+    // Normative layout, all in pixels (pinned by tests — changing any
+    // constant is a breaking change to the equivalence gate):
+    //   cell i = { pen.x + i*advance, pen.y - ascent + 0.1*px,
+    //              0.85*advance, 0.75*px }
     //   fill   = color with alpha scaled by 0.4 + 0.4*hash01(byte, f.face)
-    //   shadow: cells drawn first at +offset in shadowColor; outline: at all
-    //   eight compass offsets. The string is borrowed only for this call.
-    void text(Rect dst, std::string_view s, Font f, const TextStyle& st,
-              Color c, Rect clip);
+    // Alignment and decorations (shadows, outlines) are producer-side
+    // patterns over measure()/ascent(), not primitive properties. The
+    // string is borrowed only for this call.
+    void text(Vec2 pen, std::string_view s, Font f, Color c, Rect clip);
     void frame_end() {}
+
+    // Synthetic metrics — no font backend, a pure function of the Font.
+    // Normative: producers lay out against these, and both sides of any
+    // comparison see the same values.
+    float measure(Font f, std::string_view s) const {
+        return 0.5f * f.px * static_cast<float>(s.size()); // advance = 0.5*px/byte
+    }
+    float ascent(Font f) const { return 0.8f * f.px; }
+    float line_height(Font f) const { return 1.25f * f.px; }
 
     // ---- Result ------------------------------------------------------
     uint32_t width() const { return w_; }

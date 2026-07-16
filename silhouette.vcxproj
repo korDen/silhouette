@@ -6,6 +6,17 @@
   <ItemGroup>
     <ClCompile Include="src\render\cheap_raster.cpp" />
     <ClCompile Include="src\render\quality_raster.cpp" />
+    <ClCompile Include="src\text\font.cpp" />
+    <!-- third-party submodule TU: not held to /W4 /WX (we do not patch it).
+         <numbers> is force-included: slughorn.hpp uses std::numbers::pi_v
+         without including it (MSVC's STL does not pull it transitively). -->
+    <ClCompile Include="ext\slughorn\slughorn\slughorn.cpp">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <ForcedIncludeFiles>numbers;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <!-- freetype.hpp is decl-only unless this TU provides the impl -->
+      <PreprocessorDefinitions>SLUGHORN_FREETYPE_IMPLEMENTATION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core\geometry.hpp" />
@@ -13,6 +24,7 @@
     <ClInclude Include="src\render\cheap_raster.hpp" />
     <ClInclude Include="src\render\quality_raster.hpp" />
     <ClInclude Include="src\render\pixel_match.hpp" />
+    <ClInclude Include="src\text\font.hpp" />
   </ItemGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="common.props" />
@@ -22,6 +34,13 @@
     <ProjectGuid>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}</ProjectGuid>
     <RootNamespace>silhouette</RootNamespace>
   </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- slughorn is a submodule (not vcpkg): its include root is a
+           project concern of the targets that compile text. -->
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)ext\slughorn;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

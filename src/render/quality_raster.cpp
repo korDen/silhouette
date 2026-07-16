@@ -1,6 +1,14 @@
 #include "render/quality_raster.hpp"
 
+// slughorn/render.hpp uses std::sort/std::unique and std::bit_cast without
+// including them (third-party submodule, unpatched) — satisfy them first.
 #include <algorithm>
+#include <bit>
+
+#include "text/font.hpp"
+
+#include <slughorn/render.hpp>
+
 #include <cmath>
 
 namespace ui {
@@ -73,10 +81,87 @@ Span span_of(Rect dst, Rect clip, uint32_t w, uint32_t h) {
 
 } // namespace
 
-struct QualityRaster::FontWorld {}; // the text stage lands next
+namespace {
 
-QualityRaster::QualityRaster() = default;
+// Minimal UTF-8 decode (the sink's pinned encoding). Invalid sequences
+// decode as U+FFFD and advance one byte — deterministic, never stuck.
+uint32_t utf8_next(std::string_view s, size_t& i) {
+    const uint8_t b0 = (uint8_t)s[i++];
+    if (b0 < 0x80) return b0;
+    uint32_t cp = 0;
+    int extra = 0;
+    if ((b0 & 0xE0) == 0xC0) {
+        cp = b0 & 0x1F;
+        extra = 1;
+    } else if ((b0 & 0xF0) == 0xE0) {
+        cp = b0 & 0x0F;
+        extra = 2;
+    } else if ((b0 & 0xF8) == 0xF0) {
+        cp = b0 & 0x07;
+        extra = 3;
+    } else {
+        return 0xFFFD;
+    }
+    for (int k = 0; k < extra; ++k) {
+        if (i >= s.size() || ((uint8_t)s[i] & 0xC0) != 0x80) return 0xFFFD;
+        cp = (cp << 6) | ((uint8_t)s[i++] & 0x3F);
+    }
+    return cp;
+}
+
+} // namespace
+
+// The text stage: one Font (face + atlas + shaping) per registered id, the
+// registered-metrics rule, a per-glyph coverage-sampler cache, and the
+// gamma LUT law applied to analytic fill.
+struct QualityRaster::FontWorld {
+    struct Entry {
+        std::unique_ptr<Font> font; // null = metrics-only registration
+        float px = 0, strokeWidth = 0, invGamma = 1;
+        bool hasTable = false;
+        float ascent = 0, lineHeight = 0;
+        std::vector<float> adv; // per codepoint, COPIED at registration
+        uint32_t first = 32;
+        // scratch + caches (cleared when the atlas rebuilds)
+        std::vector<ShapedGlyph> run;
+        std::vector<uint32_t> gids;
+        ankerl::unordered_dense::map<uint32_t, slughorn::render::Sampler>
+            samplers;
+    };
+    ankerl::unordered_dense::map<FontId, Entry> fonts;
+
+    Entry* find(FontId f) {
+        auto it = fonts.find(f);
+        return it == fonts.end() ? nullptr : &it->second;
+    }
+};
+
+QualityRaster::QualityRaster() : fonts_(std::make_unique<FontWorld>()) {}
 QualityRaster::~QualityRaster() = default;
+
+void QualityRaster::set_font(FontId id, const QualityFontDesc& d) {
+    FontWorld::Entry e;
+    e.px = d.px;
+    e.strokeWidth = d.strokeWidth;
+    e.invGamma = d.gamma > 0 ? 1.0f / d.gamma : 1.0f;
+    if (d.metrics.count > 0 && d.metrics.advances != nullptr) {
+        e.hasTable = true;
+        e.ascent = d.metrics.ascent;
+        e.lineHeight = d.metrics.lineHeight;
+        e.first = d.metrics.firstCodepoint;
+        e.adv.assign(d.metrics.advances, d.metrics.advances + d.metrics.count);
+    }
+    if (d.faceBytes != nullptr && d.faceSize > 0 && d.px > 0) {
+        auto font = std::make_unique<Font>();
+        if (font->load_from_memory(d.faceBytes, d.faceSize)) {
+            if (d.strokeWidth > 0) {
+                font->set_stroke_radius(d.strokeWidth / d.px); // px -> em
+            }
+            e.font = std::move(font);
+        }
+    }
+    fonts_->fonts[id] = std::move(e);
+}
 
 void QualityRaster::set_texture(TextureId id, const uint8_t* rgba,
                                 uint32_t width, uint32_t height) {
@@ -279,6 +364,170 @@ void QualityRaster::sweep(Rect dst, Color c, float a0, float a1, float frac,
             if (a > 0) blend_px(x, y, c.r, c.g, c.b, a, kBlendNormal);
         }
     }
+}
+
+void QualityRaster::text(Vec2 pen, std::string_view s, FontId f, Color c,
+                         Rect clip) {
+    draw_run(pen, s, f, c, clip, false);
+}
+
+void QualityRaster::text_stroked(Vec2 pen, std::string_view s, FontId f,
+                                 Color c, Rect clip) {
+    draw_run(pen, s, f, c, clip, true);
+}
+
+// Unregistered fonts (and metrics-only registrations, which have no ink
+// source) draw loud magenta cells — the same failure grammar as textures,
+// impossible to miss, deterministic. Per byte at a fixed 10px.
+void QualityRaster::loud_cells(Vec2 pen, std::string_view s, Rect clip) {
+    const float px = 10, adv = 5;
+    const float top = pen.y - 0.8f * px + 0.1f * px;
+    for (size_t i = 0; i < s.size(); ++i) {
+        fill_span({pen.x + (float)i * adv, top, 0.85f * adv, 0.75f * px},
+                  {1, 0, 1, 1}, clip, kBlendNormal);
+    }
+}
+
+void QualityRaster::draw_run(Vec2 pen, std::string_view s, FontId f, Color c,
+                             Rect clip, bool stroked) {
+    if (s.empty() || c.a <= 0) return;
+    FontWorld::Entry* e = fonts_->find(f);
+    if (e == nullptr || e->font == nullptr) {
+        loud_cells(pen, s, clip);
+        return;
+    }
+    Font& font = *e->font;
+    const float px = e->px;
+    // stroked degrades to the plain run where no stroker is declared —
+    // the same doctrine the cheap rung pins.
+    const bool wantStroked = stroked && e->strokeWidth > 0;
+
+    // 1) The glyph run. THE METRICS RULE: with a registered table, glyphs
+    //    are selected per codepoint and pens step by the table's numbers
+    //    (face advance for codepoints outside it); without one, HarfBuzz
+    //    shapes and its advances/offsets govern. Everything below is px.
+    e->run.clear();
+    if (e->hasTable) {
+        size_t i = 0;
+        while (i < s.size()) {
+            const uint32_t cp = utf8_next(s, i);
+            const uint32_t gid = font.glyph_index(cp);
+            float adv;
+            if (cp >= e->first && cp - e->first < e->adv.size()) {
+                adv = e->adv[cp - e->first];
+            } else {
+                adv = font.advance_em(gid) * px;
+            }
+            e->run.push_back(ShapedGlyph{gid, adv, 0, 0, (int)i});
+        }
+    } else {
+        font.shape(s, e->run);
+        for (ShapedGlyph& g : e->run) { // em -> px
+            g.x_advance *= px;
+            g.x_offset *= px;
+            g.y_offset *= px;
+        }
+    }
+
+    // 2) Atlas registration (a rebuild invalidates every decoded sampler).
+    e->gids.clear();
+    for (const ShapedGlyph& g : e->run) {
+        e->gids.push_back(wantStroked ? (g.gid | Font::kStrokedBit) : g.gid);
+    }
+    if (font.ensure_glyphs(e->gids)) {
+        e->samplers.clear();
+    }
+
+    // 3) Pen walk: analytic banded coverage per pixel, through the gamma
+    //    law, blended src-over. em rects expand a hair so edge AA is not
+    //    clipped by the bearing box.
+    constexpr float kExpand = 0.01f;
+    float penX = pen.x;
+    for (const ShapedGlyph& g : e->run) {
+        const uint32_t key =
+            wantStroked ? (g.gid | Font::kStrokedBit) : g.gid;
+        const GlyphInfo* gi = font.glyph(key);
+        if (gi != nullptr) {
+            auto it = e->samplers.find(key);
+            if (it == e->samplers.end()) {
+                it = e->samplers
+                         .emplace(key, slughorn::render::decode(font.atlas(),
+                                                                key))
+                         .first;
+            }
+            const slughorn::render::Sampler& smp = it->second;
+
+            const float ox = penX + g.x_offset;
+            const float oy = pen.y - g.y_offset; // em y-up
+            const float emX0 = gi->bearingX - kExpand;
+            const float emY0 = (gi->bearingY - gi->height) - kExpand;
+            const float emX1 = gi->bearingX + gi->width + kExpand;
+            const float emY1 = gi->bearingY + kExpand;
+            const Rect quad{ox + emX0 * px, oy - emY1 * px,
+                            (emX1 - emX0) * px, (emY1 - emY0) * px};
+            const Span sp = span_of(quad, clip, w_, h_);
+            const float emW = emX1 - emX0, emH = emY1 - emY0;
+            const float ppeX = quad.w / emW, ppeY = quad.h / emH;
+            for (int y = sp.y0; y < sp.y1; ++y) {
+                const float fy = ((float)y + 0.5f - quad.y) / quad.h;
+                const float ey = emY1 - fy * emH; // y-flip into em space
+                for (int x = sp.x0; x < sp.x1; ++x) {
+                    const float fx = ((float)x + 0.5f - quad.x) / quad.w;
+                    const float ex = emX0 + fx * emW;
+                    float fill = (float)smp.renderSampleBanded(ex, ey, ppeX,
+                                                               ppeY)
+                                     .fill;
+                    if (fill <= 0) continue;
+                    if (e->invGamma != 1.0f) {
+                        fill = std::pow(fill, e->invGamma);
+                    }
+                    blend_px(x, y, c.r, c.g, c.b, c.a * fill, kBlendNormal);
+                }
+            }
+        }
+        penX += g.x_advance;
+    }
+}
+
+float QualityRaster::measure(FontId f, std::string_view s) const {
+    FontWorld::Entry* e = fonts_->find(f);
+    if (e == nullptr) return 0;
+    float w = 0;
+    if (e->hasTable) {
+        size_t i = 0;
+        while (i < s.size()) {
+            const uint32_t cp = utf8_next(s, i);
+            if (cp >= e->first && cp - e->first < e->adv.size()) {
+                w += e->adv[cp - e->first];
+            } else if (e->font != nullptr) {
+                w += e->font->advance_em(e->font->glyph_index(cp)) * e->px;
+            }
+        }
+        return w;
+    }
+    if (e->font == nullptr) return 0;
+    e->font->shape(s, e->run);
+    for (const ShapedGlyph& g : e->run) w += g.x_advance;
+    return w * e->px;
+}
+
+float QualityRaster::ascent(FontId f) const {
+    FontWorld::Entry* e = fonts_->find(f);
+    if (e == nullptr) return 0;
+    if (e->hasTable) return e->ascent;
+    return e->font != nullptr ? e->font->ascent() * e->px : 0;
+}
+
+float QualityRaster::line_height(FontId f) const {
+    FontWorld::Entry* e = fonts_->find(f);
+    if (e == nullptr) return 0;
+    if (e->hasTable) return e->lineHeight;
+    return e->font != nullptr ? e->font->line_height() * e->px : 0;
+}
+
+float QualityRaster::outline_width(FontId f) const {
+    FontWorld::Entry* e = fonts_->find(f);
+    return e == nullptr ? 0 : e->strokeWidth;
 }
 
 void QualityRaster::frame_end() {

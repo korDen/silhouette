@@ -37,6 +37,30 @@ class QualityRaster {
     void set_texture(TextureId id, const uint8_t* rgba, uint32_t width,
                      uint32_t height);
 
+    // ---- fonts (docs/quality-renderer.md, "THE METRICS RULE") ----------
+    // Metrics are DATA, not typography policy: when a table is registered,
+    // the font surface answers with exactly these numbers AND pens step by
+    // exactly these advances — ink from the face, positions from the
+    // registration. Without a table the face is the authority (HarfBuzz-
+    // shaped, kerned). The advance table is COPIED; faceBytes are BORROWED
+    // for the sink's lifetime. faceBytes == nullptr registers metrics-only:
+    // the surface answers, text draws the loud missing-ink cells.
+    struct FontMetrics {
+        float ascent = 0;     // baseline from the line-cell top
+        float lineHeight = 0; // the line cell the host centers against
+        const float* advances = nullptr; // px, per codepoint
+        uint32_t firstCodepoint = 32, count = 0;
+    };
+    struct QualityFontDesc {
+        const uint8_t* faceBytes = nullptr; // TTF/OTF blob, non-owning
+        size_t faceSize = 0;
+        float px = 0;          // pixels per em
+        float strokeWidth = 0; // outline stroke radius (px); 0 = no stroker
+        float gamma = 1.0f;    // coverage gamma: fill^(1/gamma)
+        FontMetrics metrics;   // count == 0: face-derived (typographic)
+    };
+    void set_font(FontId id, const QualityFontDesc& d);
+
     // ---- Sink concept (images stage) -----------------------------------
     void frame_begin(uint32_t w, uint32_t h, Color clear);
     void quad(Rect dst, Color c, uint32_t flags, Rect clip);
@@ -46,7 +70,22 @@ class QualityRaster {
                TextureId mask, Rect clip);
     void sweep(Rect dst, Color c, float a0, float a1, float frac,
                TextureId mask, Rect clip);
+    // One run at a baseline-left pen (UTF-8, borrowed for the call).
+    // text_stroked draws the font's stroked outline variants at the same
+    // advances. Unregistered fonts (and metrics-only registrations, which
+    // have no ink source) draw the loud fixed-size cells.
+    void text(Vec2 pen, std::string_view s, FontId f, Color c, Rect clip);
+    void text_stroked(Vec2 pen, std::string_view s, FontId f, Color c,
+                      Rect clip);
     void frame_end();
+
+    // ---- the font surface ----------------------------------------------
+    // Registered-table numbers when present; face metrics otherwise;
+    // zeros when unregistered.
+    float measure(FontId f, std::string_view s) const;
+    float ascent(FontId f) const;
+    float line_height(FontId f) const;
+    float outline_width(FontId f) const;
 
     // ---- Result ---------------------------------------------------------
     uint32_t width() const { return w_; }
@@ -69,14 +108,19 @@ class QualityRaster {
     void blend_px(int x, int y, float r, float g, float b, float a,
                   uint32_t mode);
     float mask_alpha(TextureId mask, float fx, float fy) const;
+    void draw_run(Vec2 pen, std::string_view s, FontId f, Color c, Rect clip,
+                  bool stroked);
+    void loud_cells(Vec2 pen, std::string_view s, Rect clip);
 
     ankerl::unordered_dense::map<TextureId, MipTexture> textures_;
     std::vector<float> canvas_; // RGB float, per-op clamped
     std::vector<uint8_t> out_;  // RGBA8, filled at frame_end
     uint32_t w_ = 0, h_ = 0;
 
-    struct FontWorld; // the text stage (faces/shaping/coverage) — next
-    std::unique_ptr<FontWorld> fonts_;
+    struct FontWorld; // faces/shaping/coverage; mutable: the font surface
+                      // is a const query that fills shaping scratch and
+                      // sampler caches
+    mutable std::unique_ptr<FontWorld> fonts_;
 };
 
 } // namespace ui

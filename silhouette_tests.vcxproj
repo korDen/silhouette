@@ -10,6 +10,7 @@
     <ClCompile Include="tests\cheap_raster_test.cpp" />
     <ClCompile Include="tests\equivalence_test.cpp" />
     <ClCompile Include="tests\quality_raster_test.cpp" />
+    <ClCompile Include="tests\quality_text_test.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="silhouette.vcxproj">
@@ -24,6 +25,13 @@
     <ProjectGuid>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}</ProjectGuid>
     <RootNamespace>silhouette_tests</RootNamespace>
   </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- slughorn is a submodule (not vcpkg): its include root is a
+           project concern of the targets that compile text. -->
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)ext\slughorn;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

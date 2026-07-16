@@ -1,0 +1,5 @@
+bin/
+obj/
+vcpkg_installed/
+.vs/
+*.user

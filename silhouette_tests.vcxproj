@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- silhouette_tests: the GTest suite — the gate every commit must pass.
+     A plain console gtest binary: Visual Studio's Test Explorer discovers it
+     from the solution; running the exe is the CLI path. gtest comes from the
+     vcpkg manifest (autolinked). -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="tests\main.cpp" />
+    <ClCompile Include="tests\geometry_test.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\core\geometry.hpp" />
+  </ItemGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="common.props" />
+  </ImportGroup>
+  <PropertyGroup>
+    <ConfigurationType>Application</ConfigurationType>
+    <ProjectGuid>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}</ProjectGuid>
+    <RootNamespace>silhouette_tests</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -1,0 +1,3 @@
+[submodule "ext/slughorn"]
+	path = ext/slughorn
+	url = https://github.com/AlphaPixel/slughorn

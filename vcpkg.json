@@ -2,7 +2,10 @@
   "name": "silhouette",
   "version": "2.0.0",
   "dependencies": [
+    "freetype",
     "gtest",
+    "harfbuzz",
+    "stb",
     "unordered-dense"
   ],
   "builtin-baseline": "bbc0882f308dc7246b431b363bd9fd76ec5be403"

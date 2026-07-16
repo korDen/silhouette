@@ -9,6 +9,7 @@
     <ClCompile Include="tests\geometry_test.cpp" />
     <ClCompile Include="tests\cheap_raster_test.cpp" />
     <ClCompile Include="tests\equivalence_test.cpp" />
+    <ClCompile Include="tests\quality_raster_test.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="silhouette.vcxproj">

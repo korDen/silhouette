@@ -98,41 +98,61 @@ class QualityRaster {
    frames allocate nothing after warmup.
 3. **Compositing**: float canvas, the same blend arithmetic as the cheap
    rung (src-over / additive / 2·dst·src overlay — the fixed-function
-   vocabulary), quantization exactly once. Deterministic: same stream +
-   same registrations → byte-identical output (goldens depend on it).
-4. **Coverage-correct edges**: destination rects composite with exact
-   fractional-pixel coverage at their edges (the cheap rung's
-   pixel-center rule is a speed cheat; reference output antialiases
-   edges analytically).
+   vocabulary), quantization exactly once. Determinism is claimed
+   PER-TOOLCHAIN: same stream + same registrations + same machine →
+   byte-identical output. Cross-machine/cross-libm float drift is real,
+   so goldens are platform-scoped, SKIP LOUDLY where unbaked, and re-bake
+   deliberately — never tolerance-fudged.
+4. **Edges stay pixel-center in v1.** Fractional-edge coverage was
+   considered and REJECTED for now: UI chrome abuts (9-slice pieces share
+   edges), and fractional coverage double-composites every shared edge —
+   visible seams on translucent chrome. Analytic edge AA returns, if
+   ever, as a whole-frame coverage rework with seam-aware compositing,
+   not as a per-rect feature.
+5. **Text encoding is pinned: UTF-8.** The sink's string_view is UTF-8;
+   the metrics table is keyed by codepoint. A host whose native text
+   world is a single-byte encoding transcodes at emission (byte ->
+   codepoint is lossless for Latin-1). The cheap rung's per-byte cells
+   are a documented cheapness artifact — comparisons are always
+   same-rung, so the divergence is invisible to every gate.
 
 ## Dependencies
 
-harfbuzz + freetype join the vcpkg manifest; slughorn (already a
-submodule) supplies the analytic coverage rasterizer. All three appear in
-the quality translation units only — the cheap renderer keeps its
-zero-dependency footprint.
+harfbuzz + freetype join the vcpkg manifest — which is baseline-PINNED:
+shaping and stroking output track library versions, so a dependency bump
+is a deliberate act that re-bakes the text goldens, never silent drift.
+slughorn (already a submodule) supplies the analytic coverage rasterizer.
+All three appear in the quality translation units only — the cheap
+renderer keeps its zero-dependency footprint.
 
 ## Testing (every line, same commit — the standing rule)
 
-- Tiny self-baked goldens per primitive family (few-KB PNGs committed):
-  filtered minification of a checkerboard, trilinear level selection, a
-  shaped run with gamma, a stroked run, fractional-edge coverage, each
-  blend mode in float.
-- Determinism: render twice, byte-equal.
-- Metrics: measure/ascent/line_height against known face constants;
-  the stroked run's advances equal the plain run's.
+- Tiny self-baked goldens per primitive family (few-KB PNGs committed),
+  rendered from IN-REPO inputs only: generated textures (checkerboards,
+  gradients) and one committed OFL-licensed subset font — the library
+  repo carries no consumer assets. Goldens are platform-scoped, SKIP
+  LOUDLY where unbaked, and re-bake deliberately (a dependency-baseline
+  bump or toolchain change is a re-bake event).
+- Coverage: filtered minification, trilinear level selection, a shaped
+  run with gamma, a stroked run, registered-metrics placement vs shaped
+  placement, each blend mode in float.
+- Determinism: render twice in-process, byte-equal.
+- Metrics: measure/ascent/line_height against the registered table AND
+  against known face constants (no-table mode); the stroked run's
+  advances equal the plain run's.
 - The cheap suite keeps gating the shared semantics (ids, geometry,
   blend vocabulary) — quality tests pin only what quality adds.
+- Mip memory: +~33% over base textures, copied at registration (the
+  cheap rung borrows; the reference rung owns) — accepted, it is a
+  reference renderer.
 
-## Open questions for review
+## Resolved review outcomes
 
-1. Mip chain at registration doubles texture memory (~33%) and copies the
-   host's pixels (the cheap rung borrows) — acceptable for a reference
-   renderer, or should mips be host-supplied like faces?
-2. Fractional-edge coverage (decision 4) makes quality output differ from
-   every hard-edged renderer by design; goldens absorb that, but is the
-   analytic-edge claim worth the implementation weight on day one, or is
-   it a follow-up once text/filtering land?
-3. Gamma-correct BLENDING (linear-space compositing) is deliberately out
-   of scope v1 (the coverage LUT is in); flag if that undermines the
-   "reference" claim.
+- Metrics-as-registered-data (the blocker): see "THE METRICS RULE" above.
+- Text encoding pinned UTF-8; single-byte hosts transcode at emission.
+- Fractional-edge coverage rejected for v1 (abutting-chrome seams).
+- Goldens: in-repo inputs, platform-scoped, baseline-pinned deps.
+- Unregistered ids fail identically to the cheap rung.
+- Gamma-correct linear-space BLENDING stays out of scope v1 (the coverage
+  gamma LUT is in); revisit with the GPU backends, which will want one
+  answer for both.

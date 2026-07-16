@@ -7,9 +7,11 @@
   <ItemGroup>
     <ClCompile Include="tests\main.cpp" />
     <ClCompile Include="tests\geometry_test.cpp" />
+    <ClCompile Include="tests\painter_test.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core\geometry.hpp" />
+    <ClInclude Include="src\paint\painter.hpp" />
   </ItemGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="common.props" />

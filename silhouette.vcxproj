@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- silhouette: the library. Headers are the API (core/, paint/, render/);
+     concrete backends with real implementation weight (the CPU renderers,
+     later the GPU backends) compile here. -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="src\render\cheap_raster.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\core\geometry.hpp" />
+    <ClInclude Include="src\paint\painter.hpp" />
+    <ClInclude Include="src\render\cheap_raster.hpp" />
+    <ClInclude Include="src\render\pixel_match.hpp" />
+  </ItemGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="common.props" />
+  </ImportGroup>
+  <PropertyGroup>
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <ProjectGuid>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}</ProjectGuid>
+    <RootNamespace>silhouette</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -1,5 +1,7 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "silhouette", "silhouette.vcxproj", "{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "silhouette_tests", "silhouette_tests.vcxproj", "{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}"
 EndProject
 Global
@@ -8,6 +10,10 @@ Global
 		Release|x64 = Release|x64
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}.Debug|x64.ActiveCfg = Debug|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}.Debug|x64.Build.0 = Debug|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}.Release|x64.ActiveCfg = Release|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}.Release|x64.Build.0 = Release|x64
 		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}.Debug|x64.ActiveCfg = Debug|x64
 		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}.Debug|x64.Build.0 = Debug|x64
 		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}.Release|x64.ActiveCfg = Release|x64

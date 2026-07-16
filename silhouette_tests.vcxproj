@@ -8,10 +8,13 @@
     <ClCompile Include="tests\main.cpp" />
     <ClCompile Include="tests\geometry_test.cpp" />
     <ClCompile Include="tests\painter_test.cpp" />
+    <ClCompile Include="tests\cheap_raster_test.cpp" />
+    <ClCompile Include="tests\equivalence_test.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\core\geometry.hpp" />
-    <ClInclude Include="src\paint\painter.hpp" />
+    <ProjectReference Include="silhouette.vcxproj">
+      <Project>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}</Project>
+    </ProjectReference>
   </ItemGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="common.props" />

@@ -235,6 +235,28 @@ TEST(CheapRasterImageReal, UnregisteredTextureIsLoudMagenta) {
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 255}));
 }
 
+TEST(CheapRasterImage, TextureZeroIsTheSolidWhiteTexel) {
+    // A masked or blended solid is image(0, ...): the tint is the fill, in
+    // BOTH modes (0 never hashes — it is the "none" sentinel, not an id).
+    const uint8_t maskTex[8] = {255, 255, 255, 255, 255, 255, 255, 0};
+    CheapRaster r(TextureMode::kReal);
+    r.set_texture(2, {maskTex, 2, 1});
+    r.frame_begin(4, 1, kBlack);
+    r.image({0, 0, 2, 1}, 0, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, /*mask=*/2,
+            kNoClip);
+    r.image({2, 0, 2, 1}, 0, {0, 0, 1, 1}, Color{0, 1, 0, 0.5f}, 0, 0, kNoClip);
+    r.frame_end();
+    EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 0})); // masked-in solid
+    EXPECT_EQ(px(r, 1, 0), (std::array<int, 3>{0, 0, 0}));   // masked-out
+    EXPECT_EQ(px(r, 2, 0), (std::array<int, 3>{0, 128, 0})); // plain 50% solid
+
+    CheapRaster s(TextureMode::kSynthetic);
+    s.frame_begin(2, 1, kBlack);
+    s.image({0, 0, 2, 1}, 0, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, 0, kNoClip);
+    s.frame_end();
+    EXPECT_EQ(px(s, 0, 0), (std::array<int, 3>{255, 0, 0})); // solid, not hash
+}
+
 // ---- image: synthetic texture mode ------------------------------------------
 
 TEST(CheapRasterImageSynthetic, DeterministicAcrossRenders) {

@@ -75,6 +75,9 @@ class CheapRaster {
     // Solid fill. Blend-mode bits of `flags` apply (additive/overlay);
     // sampling modifiers are no-ops on a solid (grayscale of white = white).
     void quad(Rect dst, Color c, uint32_t flags, Rect clip);
+    // Texture 0 = the solid white texel: tint is the fill, flags and mask
+    // still apply (a masked/blended solid is image(0, ...)). A NONZERO
+    // unregistered id draws loud magenta in kReal.
     void image(Rect dst, TextureId t, Rect uv, Color tint, uint32_t flags,
                TextureId mask, Rect clip);
     // Radial wedge, optionally cut to `mask` (sampled across dst, like

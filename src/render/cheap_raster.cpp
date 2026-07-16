@@ -191,7 +191,10 @@ void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
             const float u = uv.x + fx * uv.w;
 
             Rgba src;
-            if (mode_ == TextureMode::kSynthetic) {
+            if (t == 0) {
+                src = {1, 1, 1, 1}; // no texture: the solid white texel —
+                                    // tint is the fill; flags/mask apply
+            } else if (mode_ == TextureMode::kSynthetic) {
                 src = synthetic_texel(t,
                                       static_cast<uint32_t>(wrap_or_clamp(u, kSyntheticGrid, tileU)),
                                       static_cast<uint32_t>(wrap_or_clamp(v, kSyntheticGrid, tileV)));
@@ -199,7 +202,7 @@ void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
                 src = fetch(*td, wrap_or_clamp(u, td->width, tileU),
                             wrap_or_clamp(v, td->height, tileV));
             } else {
-                src = {1, 0, 1, 1}; // unregistered: loud magenta
+                src = {1, 0, 1, 1}; // nonzero + unregistered: loud magenta
             }
 
             // The alpha mask is the SHAPE the quad is cut to: it samples

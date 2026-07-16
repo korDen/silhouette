@@ -1,6 +1,5 @@
 bin/
 obj/
-vcpkg_installed/
 vcpkg_debug/
 vcpkg_debugasan/
 vcpkg_release/

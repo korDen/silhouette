@@ -238,20 +238,29 @@ struct Emit {
     draw << std::string((size_t)drawIndent * 2, ' ') << s << '\n';
   }
 
+  // does the host's tree carry this art? (the archive law: a source
+  // .tga may ship as .dds)
+  bool assetExists(const std::string &path) const {
+    if (opt.assetRoot.empty() || path.empty() || path[0] == '$') {
+      return true; // nothing to check against
+    }
+    namespace fs = std::filesystem;
+    fs::path full =
+        fs::path(opt.assetRoot) / (path[0] == '/' ? path.substr(1) : path);
+    std::error_code ec;
+    if (fs::exists(full, ec)) {
+      return true;
+    }
+    if (full.extension() == ".tga") {
+      full.replace_extension(".dds");
+      return fs::exists(full, ec);
+    }
+    return false;
+  }
+
   uint32_t texId(const std::string &path, int atLine) {
-    if (!opt.assetRoot.empty() && !path.empty() && path[0] != '$') {
-      namespace fs = std::filesystem;
-      fs::path full = fs::path(opt.assetRoot) /
-                      (path[0] == '/' ? path.substr(1) : path);
-      std::error_code ec;
-      bool ok = fs::exists(full, ec);
-      if (!ok && full.extension() == ".tga") {
-        full.replace_extension(".dds");
-        ok = fs::exists(full, ec);
-      }
-      if (!ok) {
-        err(atLine, "missing asset: " + path);
-      }
+    if (!assetExists(path)) {
+      err(atLine, "missing asset: " + path);
     }
     auto it = texIds.find(path);
     if (it != texIds.end()) {
@@ -342,6 +351,15 @@ struct Emit {
         }
         return "gen_detail::num((long long)(" + expr(*e.args[1]) + "))";
       }
+      // an enum's ordinal: the one bridge between a typed schema enum
+      // and the plain numbers a folded template param carries
+      if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "ord") {
+        if (e.args.size() != 2) {
+          err(e.line, "ord takes (value)");
+          return "0";
+        }
+        return "(long long)(" + expr(*e.args[1]) + ")";
+      }
       if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "fixed") {
         if (e.args.size() != 3) {
           err(e.line, "fixed takes (value, decimals)");
@@ -350,7 +368,7 @@ struct Emit {
         return "gen_detail::fixed((double)(" + expr(*e.args[1]) + "), (int)(" +
                expr(*e.args[2]) + "))";
       }
-      err(e.line, "call in bind (subset builtins: fracf, num, fixed)");
+      err(e.line, "call in bind (subset builtins: fracf, num, fixed, ord)");
       return "0";
     case Expr::kUnary:
       return "(" + e.text + expr(*e.args[0]) + ")";
@@ -415,8 +433,10 @@ struct Emit {
     }
     auto styleIt = bag.find("style");
     if (styleIt != bag.end()) {
-      // left-to-right, widget wins (first insertion wins the bag)
-      const std::string s = styleIt->second;
+      // left-to-right, widget wins (first insertion wins the bag). The NAME may
+      // be a template param (a caller choosing this instance's look),
+      // so it folds before the lookup.
+      const std::string s = substitute(styleIt->second);
       size_t i = 0;
       while (i <= s.size()) {
         const size_t comma = std::min(s.find(',', i), s.size());
@@ -1285,15 +1305,57 @@ struct Emit {
         flags = "ui::kTileU";
       }
       drawLine("sink.image(" + dst + ", " + idExpr + ", " + uv + ", " +
-               colorLiteral(bag, n.line, 1) + ", " + flags +
-               ", 0, ui::kNoClip);");
+               colorLiteral(bag, n.line, 1) + ", " + flags + ", " +
+               maskOf(bag, n.line) + ", ui::kNoClip);");
       return;
     }
+    // $white is the solid texel: a fill that an alpha mask can cut to
+    // shape, which is how the source material stencils its slots
     if (get(bag, "color") != nullptr ||
         (tex != nullptr && *tex == "$white")) {
+      const std::string mask = maskOf(bag, n.line);
+      if (mask != "0") {
+        drawLine("sink.image(" + dst + ", 0, {0, 0, 1, 1}, " +
+                 colorLiteral(bag, n.line, 1) + ", 0, " + mask +
+                 ", ui::kNoClip);");
+        return;
+      }
       drawLine("sink.quad(" + dst + ", " + colorLiteral(bag, n.line, 1) +
                ", 0, ui::kNoClip);");
     }
+  }
+
+  // the alpha mask a widget wears (usealphamask + alphamaskfile) — the
+  // shape its ink is cut to, sampled across the destination rect
+  std::string maskOf(const std::map<std::string, std::string> &bag,
+                     int atLine) {
+    if (!flag(bag, "usealphamask", false)) {
+      return "0";
+    }
+    const std::string *f = get(bag, "alphamaskfile");
+    if (f == nullptr) {
+      diags.push_back({m.name, atLine, 0,
+                       "usealphamask without an alphamaskfile",
+                       Diag::Severity::kWarning});
+      return "0";
+    }
+    std::string path = *f;
+    auto it = assetConsts.find(path);
+    if (it != assetConsts.end()) {
+      path = it->second;
+    }
+    // A mask is a MODIFIER: art the host cannot load simply does not
+    // cut the shape — the widget simply draws whole, uncut.
+    // Converted trees carry dead mask paths their own source shipped, so
+    // this degrades loudly instead of failing the build — unlike a
+    // texture the widget IS.
+    if (!assetExists(path)) {
+      diags.push_back({m.name, atLine, 0,
+                       "missing alpha mask (drawing unmasked): " + path,
+                       Diag::Severity::kWarning});
+      return "0";
+    }
+    return texIdExpr(path, atLine);
   }
 
   void registerModule(const Module &mod) {

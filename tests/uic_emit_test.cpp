@@ -405,6 +405,49 @@ TEST(UicEmit, AnUnfontedUncoloredLabelIsGray) {
   EXPECT_NE(h.find("ui::Color{0.5f, 0.5f, 0.5f, 1.0f}"), std::string::npos);
 }
 
+TEST(UicEmit, AlphaMasksCutTheirWidgetToShape) {
+  // usealphamask + alphamaskfile = the shape a widget's ink is cut to
+  // (the sink's mask arg). $white + a mask is a stencil — the mask alone
+  // defines the shape, the fill is pure colour.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "style square_mask { usealphamask: 1;\n"
+      "                  alphamaskfile: /ui/mask/square_cutout.tga; }\n"
+      "panel { width: 4h; height: 4h;\n"
+      "    image { texture: $white; style: square_mask; color: 1 0 0 1; }\n"
+      "    image { texture: /art/icon.img; style: square_mask; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // the stencil: texture 0 (the white texel) cut by the mask, NOT a
+  // bare quad
+  EXPECT_NE(h.find("sink.image({ax1, ay1, w1, h1}, 0, {0, 0, 1, 1}, "
+                   "ui::Color{1.0f, 0.0f, 0.0f, 1.0f}, 0, 0x"),
+            std::string::npos);
+  EXPECT_EQ(h.find("sink.quad"), std::string::npos);
+  // a real texture wears the same mask
+  EXPECT_NE(h.find("/ui/mask/square_cutout.tga */, ui::kNoClip);"),
+            std::string::npos);
+}
+
+TEST(UicEmit, AStyleNameCanComeFromAParam) {
+  // a caller choosing this instance's look: the style NAME folds
+  // before the lookup
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "style round_mask { usealphamask: 1;\n"
+      "                  alphamaskfile: /ui/mask/round.tga; }\n"
+      "style square_mask { usealphamask: 1;\n"
+      "                  alphamaskfile: /ui/mask/square.tga; }\n"
+      "template slot { in shape: ident = round_mask;\n"
+      "    image { texture: $white; style: shape; } }\n"
+      "panel { slot { } slot { shape: square_mask; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("/ui/mask/round.tga"), std::string::npos);
+  EXPECT_NE(h.find("/ui/mask/square.tga"), std::string::npos);
+}
+
 TEST(UicEmit, ButtonsRenderTheirRestingState) {
   // buttons are containers; only the 'up' widgetstate renders in the
   // static build, and states never union, chain, or become targets

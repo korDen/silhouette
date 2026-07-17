@@ -731,11 +731,15 @@ struct Emit {
                            Diag::Severity::kWarning});
           continue;
         }
-        // arg values may reference the OUTER instantiation's params
-        const std::string folded = substitute(a.value);
+        // arg values may reference the OUTER instantiation's params; a
+        // match arg PROJECTS a fused enum back to a component — foo {
+        // tone: match fused_state { ... } } — folding the
+        // scrutinee here and passing the picked arm on
+        const std::string folded =
+            a.isMatch() ? resolveMatch(a) : substitute(a.value);
         if (param->isEnum()) {
           // an enum param: the arg must fold to one of its values (a
-          // literal here, or a forward that resolves to one)
+          // literal, a forward, or a match projection that resolves to one)
           bool ok = false;
           for (const std::string &v : param->enumValues) {
             ok = ok || folded == v;
@@ -748,7 +752,7 @@ struct Emit {
             err(a.line, "arg '" + a.name + "' of '" + t.name + "' is '" +
                             folded + "', not one of: " + vals);
           }
-        } else {
+        } else if (!a.isMatch()) {
           // the args are TYPED: the value's form (or the referenced
           // outer param's declared type) must match the declaration
           const std::string cls = valueType(a.value);

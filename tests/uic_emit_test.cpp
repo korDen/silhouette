@@ -452,6 +452,31 @@ TEST(UicEmit, MatchOverAnEnumPicksAndValidatesEachArm) {
   EXPECT_EQ(h.find("match"), std::string::npos); // resolved, not emitted
 }
 
+TEST(UicEmit, AMatchArgProjectsAFusedEnumBackToAComponent) {
+  // a two-param hole fuses to one enum; a child that
+  // wants just one of them gets it decoupled with a match ARG — the fusion
+  // is never a dead end (by design)
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template face { in tone: light | dark;\n"
+      "    image { texture: match tone {\n"
+      "        light: /art/light.tga;\n"
+      "        dark: /art/dark.tga;\n"
+      "    } } }\n"
+      "template btn { in look: light_up | dark_over;\n"
+      "    face { tone: match look {\n"
+      "        light_up: light;\n"
+      "        dark_over: dark;\n"
+      "    } } }\n"
+      "panel { btn { look: dark_over; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // look=dark_over -> tone=dark -> the dark face texture
+  EXPECT_NE(h.find("/art/dark.tga"), std::string::npos);
+  EXPECT_EQ(h.find("/art/light.tga"), std::string::npos);
+  EXPECT_EQ(h.find("match"), std::string::npos); // both resolved
+}
+
 TEST(UicEmit, AMatchOnANonAssetAttrIsNotFileChecked) {
   // a `style:` match resolves to a style NAME, not a file — the asset
   // existence check must NOT fire (those bare names are no paths). The

@@ -153,11 +153,17 @@ TEST(UicEmit, GrowUnionsInAPassLoop) {
   // the floor law: explicit height floors the union; missing width = 0
   EXPECT_NE(h.find("w0 = 0.0f;"), std::string::npos);
   EXPECT_NE(h.find("h0 = R(0.0399"), std::string::npos); // 4h floor
-  // pass loop with unions gated to pass 0
+  // pass loop with the four-edged union gated to pass 0: the child's
+  // extent is offset by the current origin shift before uniting
   EXPECT_NE(h.find("for (int pass0 = 0; pass0 < 2; ++pass0)"),
             std::string::npos);
-  EXPECT_NE(h.find("if (pass0 == 0) { w0 = std::max(w0, x1 + w1); h0 = "
-                   "std::max(h0, y1 + h1); }"),
+  EXPECT_NE(h.find("if (pass0 == 0) { const float nx1 = lox0 + x1, "
+                   "ny1 = loy0 + y1; "
+                   "hix0 = std::max(hix0, nx1 + w1); "
+                   "hiy0 = std::max(hiy0, ny1 + h1); "
+                   "lox0 = std::min(lox0, nx1); "
+                   "loy0 = std::min(loy0, ny1); "
+                   "w0 = hix0 - lox0; h0 = hiy0 - loy0; }"),
             std::string::npos);
 }
 
@@ -260,6 +266,28 @@ TEST(UicEmit, BoolParamsFoldIntoVisibility) {
   // first instance draws; the defaulted (false) one is a hidden subtree
   EXPECT_NE(h.find("/art/cap.img"), std::string::npos);
   EXPECT_NE(h.find("hidden subtree"), std::string::npos);
+}
+
+TEST(UicEmit, GrowUnionIsFourEdged) {
+  // the union extends ALL edges — a bottom-valigned child in a 0-floor grow
+  // parent lands at a negative offset in pass 0, pulls the origin (lo
+  // marks), the parent sizes to hi - lo, and pass 1 repositions the
+  // child inside the grown rect. A right/bottom-only max() leaves the
+  // parent 0-tall and the child overflowing upward.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { grow: 1; float: right;\n"
+      "    image { texture: /art/a.img; width: 2h; height: 2h;\n"
+      "            valign: bottom; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("loy0 = std::min(loy0, ny1)"), std::string::npos);
+  EXPECT_NE(h.find("h0 = hiy0 - loy0"), std::string::npos);
+  // the accumulators reset from the explicit floor at pass 0
+  EXPECT_NE(h.find("if (pass0 == 0) { lox0 = 0; loy0 = 0; hix0 = w0; "
+                   "hiy0 = h0; }"),
+            std::string::npos);
 }
 
 TEST(UicEmit, StructuralIfLowersToAbsenceGuards) {

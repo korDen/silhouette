@@ -755,9 +755,17 @@ struct Emit {
     const bool growinvis = flag(sw.attrs, "growinvis", true);
 
     if (grows) {
+      // the union is FOUR-EDGED: a negative-offset child pulls
+      // the origin — lo marks track it, the size is hi - lo, and the
+      // growPass repositions children against the grown rect
+      decl << "  float lox" << sfx << " = 0, loy" << sfx << " = 0, hix"
+           << sfx << " = 0, hiy" << sfx << " = 0;\n";
       solveLine("for (int pass" + sfx + " = 0; pass" + sfx + " < 2; ++pass" +
                 sfx + ") { // grow: pass 0 unions, pass 1 = the growPass");
       ++solveIndent;
+      solveLine("if (pass" + sfx + " == 0) { lox" + sfx + " = 0; loy" +
+                sfx + " = 0; hix" + sfx + " = " + vw + "; hiy" + sfx +
+                " = " + vh + "; }");
     }
     std::string cursor;
     if (mainAxis != 0) {
@@ -793,10 +801,20 @@ struct Emit {
           if (!cw.guard.empty()) {
             cond += " && (" + cw.guard + ")";
           }
-          solveLine("if (" + cond + ") { " + vw + " = std::max(" + vw +
-                    ", x" + cs + " + w" + cs + "); " + vh +
-                    " = std::max(" + vh + ", y" + cs + " + h" + cs +
-                    "); }");
+          // the child solved against the CURRENT (shifted) origin, which
+          // sits at lo in the pass-0 frame — offset its extent before
+          // uniting, or later children re-count the shift (uniting in
+          // the parent's parent space would get this for free)
+          solveLine("if (" + cond + ") { const float nx" + cs + " = lox" +
+                    sfx + " + x" + cs + ", ny" + cs + " = loy" + sfx +
+                    " + y" + cs + "; hix" + sfx + " = std::max(hix" + sfx +
+                    ", nx" + cs + " + w" + cs + "); hiy" + sfx +
+                    " = std::max(hiy" + sfx + ", ny" + cs + " + h" + cs +
+                    "); lox" + sfx + " = std::min(lox" + sfx + ", nx" +
+                    cs + "); loy" + sfx + " = std::min(loy" + sfx +
+                    ", ny" + cs + "); " + vw + " = hix" + sfx + " - lox" +
+                    sfx + "; " + vh + " = hiy" + sfx + " - loy" + sfx +
+                    "; }");
         }
         if (mainAxis != 0 && advances) {
           const std::string cend = mainAxis == 'x'

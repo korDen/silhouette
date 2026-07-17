@@ -124,11 +124,13 @@ struct TemplateDecl {
 
 struct StructField {
   std::string name;
-  std::string type;
+  std::string type; // "" when enumValues is set (an inline enum field)
+  std::vector<std::string> enumValues; // inline enum: `name: a | b | c`
   int arrayLen = 0; // 0 = scalar; N = `type[N]` fixed array
   std::string defaultValue;
   bool hasDefault = false;
   int line = 0;
+  bool isEnum() const { return !enumValues.empty(); }
 };
 
 struct StructDecl {

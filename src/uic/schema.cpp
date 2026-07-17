@@ -8,6 +8,7 @@
 // the renderer" is machine-enforced, not a convention.
 #include "uic/uic.hpp"
 
+#include <cstdint>
 #include <set>
 #include <sstream>
 
@@ -19,6 +20,17 @@ struct TypeInfo {
   std::string cpp;
   bool isEnum = false;
 };
+
+// FNV-1a, matching the emitted sid() exactly — used to detect a collision
+// within one inline-enum value set at codegen (a free static check)
+uint32_t sidHash(const std::string &s) {
+  uint32_t h = 2166136261u;
+  for (const unsigned char c : s) {
+    h ^= c;
+    h *= 16777619u;
+  }
+  return h;
+}
 
 // builtin scalar map — the schema's vocabulary
 const char *builtinType(const std::string &t) {
@@ -52,6 +64,19 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
   }
 
   auto resolve = [&](const StructField &f) -> TypeInfo {
+    if (f.isEnum()) {
+      // an inline-enum field: a uint32_t sid. Hash the values now and
+      // hard-error on any clash (the free static check).
+      std::set<uint32_t> seen;
+      for (const std::string &v : f.enumValues) {
+        if (!seen.insert(sidHash(v)).second) {
+          diags.push_back({m.name, f.line, 0,
+                           "field '" + f.name + "': two values collide under "
+                           "sid() — rename one"});
+        }
+      }
+      return {"uint32_t", false};
+    }
     if (const char *b = builtinType(f.type)) {
       return {b, false};
     }
@@ -77,7 +102,17 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
      << "#include <array>\n"
      << "#include <cstdint>\n"
      << "#include <type_traits>\n\n"
-     << "namespace " << ns << " {\n\n";
+     << "namespace " << ns << " {\n\n"
+     // an inline-enum field is a uint32_t sid — the FNV-1a of its value,
+     // folded at compile time. Same string -> same id everywhere (schema,
+     // panel, host), so `==` is a plain uint32_t compare across headers,
+     // no shared enum type. One constexpr home, no guard needed.
+     << "constexpr uint32_t sid(const char *s) {\n"
+     << "  uint32_t h = 2166136261u;\n"
+     << "  while (*s != 0) { h ^= (uint32_t)(unsigned char)*s++; h *= "
+        "16777619u; }\n"
+     << "  return h;\n"
+     << "}\n\n";
 
   for (const EnumDecl &e : m.enums) {
     os << "enum class " << e.name << " : int32_t {\n";
@@ -102,7 +137,9 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
       } else {
         os << t.cpp << ' ' << f.name;
         if (f.hasDefault) {
-          if (t.isEnum) {
+          if (f.isEnum()) {
+            os << " = sid(\"" << f.defaultValue << "\")";
+          } else if (t.isEnum) {
             os << " = " << f.type << "::" << f.defaultValue;
           } else {
             os << " = " << f.defaultValue;

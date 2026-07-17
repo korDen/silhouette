@@ -208,7 +208,14 @@ class Printer {
     line("struct " + s.name + " {");
     ++indent_;
     for (const StructField &f : s.fields) {
-      std::string d = f.name + ": " + f.type;
+      std::string d = f.name + ": ";
+      if (f.isEnum()) {
+        for (size_t i = 0; i < f.enumValues.size(); ++i) {
+          d += (i != 0 ? " | " : "") + f.enumValues[i];
+        }
+      } else {
+        d += f.type;
+      }
       if (f.arrayLen != 0) {
         d += "[" + std::to_string(f.arrayLen) + "]";
       }

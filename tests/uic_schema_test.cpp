@@ -31,6 +31,37 @@ constexpr std::string_view kSchema =
     "    members: Member[3];\n"
     "}\n";
 
+TEST(UicSchema, AnInlineEnumFieldIsAUint32Sid) {
+  // an inline-enum field lowers to a uint32_t string-id (FNV-1a folded at
+  // compile time), so `==` is a plain compare across the schema/panel/host
+  // headers with no shared enum type. sid() is emitted once, here.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit("struct Unit {\n"
+                             "    solid: int;\n"
+                             "    primary: solid | liquid | gas "
+                             "= solid;\n"
+                             "}\n",
+                             &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("constexpr uint32_t sid(const char *s)"),
+            std::string::npos);
+  EXPECT_NE(h.find("uint32_t primary = sid(\"solid\");"),
+            std::string::npos);
+}
+
+TEST(UicSchema, CollidingSidValuesAreLoud) {
+  // two values sharing one sid would make `==` ambiguous — a free static
+  // check catches it. A genuine FNV-1a clash is astronomically rare, so
+  // exercise the same path with a duplicate value, which must be loud.
+  std::vector<uic::Diag> diags;
+  (void)emit("struct S { f: a | a; }\n", &diags);
+  bool loud = false;
+  for (const uic::Diag &d : diags) {
+    loud = loud || d.msg.find("collide") != std::string::npos;
+  }
+  EXPECT_TRUE(loud);
+}
+
 TEST(UicSchema, EnumsStructsArraysDefaults) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(kSchema, &diags);

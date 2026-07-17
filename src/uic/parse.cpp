@@ -345,6 +345,20 @@ private:
         continue;
       }
       f.type = std::string(ty.text);
+      // `field: a | b | c` — an inline enum (a closed id set), same as a
+      // template param's; the generator lowers it to a uint32_t sid
+      if (at(Tok::kPipe)) {
+        f.enumValues.push_back(std::string(ty.text));
+        while (eat(Tok::kPipe)) {
+          const Token v = expectIdent("enum value");
+          if (v.kind != Tok::kIdent) {
+            sync();
+            break;
+          }
+          f.enumValues.push_back(std::string(v.text));
+        }
+        f.type.clear();
+      }
       if (eat(Tok::kLBracket)) { // `type[N]` fixed array
         if (!at(Tok::kNumber)) {
           error(peek(), "expected array length");

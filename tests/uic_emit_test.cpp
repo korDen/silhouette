@@ -97,12 +97,21 @@ TEST(UicEmit, ManifestCarriesIdsAndPaths) {
   EXPECT_NE(h.find("\"/art/one.img\""), std::string::npos);
 }
 
-TEST(UicEmit, OutsideTheSubsetIsLoud) {
+TEST(UicEmit, OutsideTheSubsetDegradesLoudly) {
+  // the functional bar: unsupported constructs WARN and skip — the rest
+  // of the module still compiles and renders (never a hard stop)
   std::vector<uic::Diag> diags;
-  emit("panel { button { color: white; } }\n", &diags);
+  const std::string h = emit(
+      "panel { button { color: white; } image { texture: /art/a.img; } }\n",
+      &diags);
   ASSERT_FALSE(diags.empty());
-  EXPECT_NE(diags[0].msg.find("outside the absolute subset"),
+  EXPECT_EQ(diags[0].severity, uic::Diag::Severity::kWarning);
+  EXPECT_FALSE(uic::hasErrors(diags));
+  EXPECT_NE(diags[0].msg.find("skipped (unsupported yet)"),
             std::string::npos);
+  EXPECT_NE(h.find("// SKIP(unsupported): widget 'button'"),
+            std::string::npos);
+  EXPECT_NE(h.find("/art/a.img"), std::string::npos); // the rest emitted
 }
 
 TEST(UicEmit, VisibleZeroFoldsAway) {

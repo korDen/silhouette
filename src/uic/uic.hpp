@@ -11,11 +11,22 @@
 namespace uic {
 
 struct Diag {
+  enum class Severity { kWarning, kError };
   std::string file;
   int line = 0;
   int col = 0;
   std::string msg;
+  Severity severity = Severity::kError;
 };
+
+inline bool hasErrors(const std::vector<Diag> &diags) {
+  for (const Diag &d : diags) {
+    if (d.severity == Diag::Severity::kError) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // Parse one module. `fileName` labels diagnostics and becomes
 // Module::name (basename, extension stripped). Recovers at statement

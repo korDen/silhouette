@@ -123,16 +123,32 @@ bool parseColor(const std::string &s, float out[4]) {
     out[3] = s.size() == 9 ? hex(7) : 1.f;
     return true;
   }
-  if (s == "white") {
-    return true;
-  }
-  if (s == "black") {
-    out[0] = out[1] = out[2] = 0;
-    return true;
-  }
-  if (s == "gray" || s == "grey") {
-    out[0] = out[1] = out[2] = 0.5f;
-    return true;
+  // the standard web colour keywords (rounded), plus 'invisible'
+  static const struct {
+    const char *name;
+    float r, g, b, a;
+  } kNamed[] = {
+      {"white", 1, 1, 1, 1},       {"black", 0, 0, 0, 1},
+      {"gray", .5f, .5f, .5f, 1},  {"grey", .5f, .5f, .5f, 1},
+      {"silver", .75f, .75f, .75f, 1},
+      {"red", 1, 0, 0, 1},         {"green", 0, .5f, 0, 1},
+      {"lime", 0, 1, 0, 1},        {"blue", 0, 0, 1, 1},
+      {"navy", 0, 0, .5f, 1},      {"teal", 0, .5f, .5f, 1},
+      {"aqua", 0, 1, 1, 1},        {"cyan", 0, 1, 1, 1},
+      {"yellow", 1, 1, 0, 1},      {"orange", 1, .647f, 0, 1},
+      {"brown", .647f, .165f, .165f, 1},
+      {"olive", .5f, .5f, 0, 1},   {"purple", .5f, 0, .5f, 1},
+      {"maroon", .5f, 0, 0, 1},    {"fuchsia", 1, 0, 1, 1},
+      {"magenta", 1, 0, 1, 1},     {"invisible", 0, 0, 0, 0},
+  };
+  for (const auto &n : kNamed) {
+    if (s == n.name) {
+      out[0] = n.r;
+      out[1] = n.g;
+      out[2] = n.b;
+      out[3] = n.a;
+      return true;
+    }
   }
   // space-separated floats "r g b [a]"
   const char *p = s.c_str();
@@ -169,7 +185,17 @@ struct Emit {
   int indent = 1;
 
   void err(int line, std::string msg) {
-    diags.push_back({m.name, line, 0, std::move(msg)});
+    diags.push_back({m.name, line, 0, std::move(msg),
+                     Diag::Severity::kError});
+  }
+
+  // graceful degradation: the generated tree must LOAD AND RENDER from
+  // the first commit (the functional bar) — an unsupported
+  // construct is a LOUD warning and a skip comment, never a hard stop
+  void skip(int atLine, const std::string &what) {
+    diags.push_back({m.name, atLine, 0, "skipped (unsupported yet): " + what,
+                     Diag::Severity::kWarning});
+    line("// SKIP(unsupported): " + what + " :" + std::to_string(atLine));
   }
 
   void line(const std::string &s) {
@@ -328,12 +354,11 @@ struct Emit {
   void emitNode(const Node &n, const std::string &px, const std::string &py,
                 const std::string &pw, const std::string &ph) {
     if (n.kind != Node::kWidget) {
-      err(n.line, "if/widgetstate are outside the absolute subset (land "
-                  "with the instantiate pass)");
+      skip(n.line, n.kind == Node::kIf ? "if arms" : "widgetstate");
       return;
     }
     if (n.tag != "panel" && n.tag != "image" && n.tag != "frame") {
-      err(n.line, "widget '" + n.tag + "' is outside the absolute subset");
+      skip(n.line, "widget '" + n.tag + "'");
       return;
     }
     if (const std::string *v = attr(n, "visible")) {
@@ -439,7 +464,8 @@ struct Emit {
     if (n.tag == "frame") {
       const std::string *tex = attr(n, "texture");
       if (tex == nullptr) {
-        err(n.line, "frame needs texture");
+        skip(n.line, "textureless frame (the white-pieces law lands with "
+                     "the full frame pass)");
         return;
       }
       const std::string *bt = attr(n, "borderthickness");
@@ -486,7 +512,8 @@ struct Emit {
     const std::string *tex = attr(n, "texture");
     const Bind *texBind = bind(n, "texture");
     if (n.tag == "image" && tex == nullptr && texBind == nullptr) {
-      err(n.line, "image needs texture");
+      // texture was deferred (a TODO'd interpolation) — degrade
+      skip(n.line, "image without a resolvable texture");
       return;
     }
     if (tex != nullptr && *tex == "$invis") {

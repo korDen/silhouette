@@ -72,23 +72,26 @@ int main(int argc, char **argv) {
     std::vector<uic::Diag> diags;
     const uic::Module m = uic::parseModule(text, f, diags);
     for (const uic::Diag &d : diags) {
-      std::fprintf(stderr, "%s:%d:%d: %s\n", d.file.c_str(), d.line, d.col,
+      std::fprintf(stderr, "%s:%d:%d: %s: %s\n", d.file.c_str(), d.line,
+                   d.col,
+                   d.severity == uic::Diag::Severity::kError ? "error"
+                                                             : "warning",
                    d.msg.c_str());
     }
-    if (!diags.empty()) {
+    if (uic::hasErrors(diags)) {
       ++failures;
     }
     if (dump) {
       std::fputs(uic::dumpModule(m).c_str(), stdout);
     }
-    if (!schemaOut.empty() && diags.empty()) {
+    if (!schemaOut.empty() && !uic::hasErrors(diags)) {
       std::vector<uic::Diag> schemaDiags;
       const std::string header = uic::emitSchemaHeader(m, ns, schemaDiags);
       for (const uic::Diag &d : schemaDiags) {
         std::fprintf(stderr, "%s:%d: %s\n", d.file.c_str(), d.line,
                      d.msg.c_str());
       }
-      if (!schemaDiags.empty()) {
+      if (uic::hasErrors(schemaDiags)) {
         ++failures;
         continue;
       }
@@ -101,18 +104,28 @@ int main(int argc, char **argv) {
       out << header;
       std::printf("schema -> %s\n", schemaOut.c_str());
     }
-    if (!emitOut.empty() && diags.empty()) {
+    if (!emitOut.empty() && !uic::hasErrors(diags)) {
       uic::EmitOptions opt;
       opt.ns = ns;
       opt.schemaInclude = schemaInclude;
       opt.assetRoot = assetRoot;
       std::vector<uic::Diag> emitDiags;
       const std::string header = uic::emitPanelHeader(m, opt, emitDiags);
+      int skips = 0;
       for (const uic::Diag &d : emitDiags) {
-        std::fprintf(stderr, "%s:%d: %s\n", d.file.c_str(), d.line,
+        if (d.severity == uic::Diag::Severity::kWarning) {
+          ++skips;
+          continue; // summarized below — degradation is loud but compact
+        }
+        std::fprintf(stderr, "%s:%d: error: %s\n", d.file.c_str(), d.line,
                      d.msg.c_str());
       }
-      if (!emitDiags.empty()) {
+      if (skips != 0) {
+        std::fprintf(stderr, "%s: %d unsupported construct(s) skipped "
+                             "(SKIP comments mark them in the output)\n",
+                     f.c_str(), skips);
+      }
+      if (uic::hasErrors(emitDiags)) {
         ++failures;
         continue;
       }

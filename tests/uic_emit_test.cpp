@@ -220,6 +220,48 @@ TEST(UicEmit, InstantiationDiagnostics) {
   EXPECT_FALSE(uic::hasErrors(diags)); // degradation, not failure
 }
 
+TEST(UicEmit, ArgsAreTypeChecked) {
+  std::vector<uic::Diag> diags;
+  emit("template t { in first: bool; in slot: num; in label: str;\n"
+       "    panel { visible: first; } }\n"
+       "template mid { in outer: num;\n"
+       "    panel { t { first: true; slot: outer; label: word_ok; } } }\n"
+       "panel {\n"
+       "    t { first: 1; slot: \"nope\"; label: \"quoted ok\"; }\n"
+       "    mid { outer: 3; }\n"
+       "}\n",
+       &diags);
+  // the two bad args error; the good instantiations (bool literal,
+  // same-typed param ref, bare word into str, quoted str) are silent
+  int errors = 0;
+  for (const uic::Diag &d : diags) {
+    if (d.severity == uic::Diag::Severity::kError) {
+      ++errors;
+      EXPECT_TRUE(d.msg.find("is bool, got num '1'") != std::string::npos ||
+                  d.msg.find("is num, got str") != std::string::npos)
+          << d.msg;
+    }
+  }
+  EXPECT_EQ(errors, 2);
+}
+
+TEST(UicEmit, BoolParamsFoldIntoVisibility) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template cap { in first: bool = false;\n"
+      "    image { texture: /art/cap.img; width: 2h; height: 2h;\n"
+      "            visible: first; } }\n"
+      "panel { width: 10h; height: 2h;\n"
+      "    cap { first: true; }\n"
+      "    cap { }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // first instance draws; the defaulted (false) one is a hidden subtree
+  EXPECT_NE(h.find("/art/cap.img"), std::string::npos);
+  EXPECT_NE(h.find("hidden subtree"), std::string::npos);
+}
+
 TEST(UicEmit, StructuralIfLowersToAbsenceGuards) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

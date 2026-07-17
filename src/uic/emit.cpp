@@ -202,6 +202,7 @@ struct Emit {
   std::set<std::string> enumNames; // schema enums -> scope-resolved refs
   std::deque<SolvedW> arena;
   std::vector<std::map<std::string, std::string>> envStack;
+  std::vector<const TemplateDecl *> declStack; // enclosing param types
   int instanceDepth = 0;
   int nextVar = 0;
   int solveIndent = 1, drawIndent = 1;
@@ -416,7 +417,99 @@ struct Emit {
   static bool flag(const std::map<std::string, std::string> &bag,
                    std::string_view key, bool def) {
     const std::string *v = get(bag, key);
-    return v == nullptr ? def : (*v != "0");
+    // dialect truthiness ("0" is false) plus the typed spelling
+    return v == nullptr ? def : (*v != "0" && *v != "false");
+  }
+
+  // ---- arg typing (the .ui is fully type-checked) -----------------------
+
+  // the syntactic type of an instantiation arg: a literal's form, or
+  // the declared type of the outer param it references
+  std::string valueType(const std::string &v) const {
+    if (v.empty()) {
+      return "";
+    }
+    if (v == "true" || v == "false") {
+      return "bool";
+    }
+    char *end = nullptr;
+    std::strtod(v.c_str(), &end);
+    if (end != v.c_str() && end != nullptr) {
+      if (*end == '\0') {
+        return "num";
+      }
+      // the unit grammar: a number wearing a single unit suffix is a dim
+      const std::string_view sfx(end);
+      if (sfx == "h" || sfx == "w" || sfx == "%" || sfx == "@" ||
+          sfx == "s" || sfx == "i" || sfx == "a") {
+        return "dim";
+      }
+    }
+    if (v.front() == '"') {
+      return "str";
+    }
+    if (v.front() == '/') {
+      return "asset";
+    }
+    if (v.front() == '#') {
+      return "color"; // #rrggbb[aa]
+    }
+    {
+      // 3-4 space-separated floats = a color literal
+      int tokens = 0;
+      size_t i = 0;
+      bool numeric = true;
+      while (i < v.size() && numeric) {
+        while (i < v.size() && v[i] == ' ') {
+          ++i;
+        }
+        if (i >= v.size()) {
+          break;
+        }
+        size_t j = v.find(' ', i);
+        if (j == std::string::npos) {
+          j = v.size();
+        }
+        const std::string tok = v.substr(i, j - i);
+        char *tokEnd = nullptr;
+        std::strtod(tok.c_str(), &tokEnd);
+        numeric = tokEnd != tok.c_str() && *tokEnd == '\0';
+        ++tokens;
+        i = j;
+      }
+      if (numeric && tokens >= 3 && tokens <= 4) {
+        return "color";
+      }
+    }
+    for (auto it = declStack.rbegin(); it != declStack.rend(); ++it) {
+      for (const InParam &p : (*it)->ins) {
+        if (p.name == v) {
+          return p.type;
+        }
+      }
+    }
+    return "word"; // a bare symbol
+  }
+
+  static bool typeCompatible(const std::string &declared,
+                             const std::string &cls) {
+    if (cls.empty()) {
+      return true; // nothing to judge
+    }
+    if (declared == cls) {
+      return true;
+    }
+    if (declared == "dim") {
+      return cls == "num"; // a bare number is a px dim
+    }
+    if (declared == "ident") {
+      return cls == "word"; // a bare symbol IS an identifier
+    }
+    if (declared == "color") {
+      return cls == "word"; // named colors; parseColor judges the name
+    }
+    // only-text-is-quoted: word-like strings pass unquoted
+    return declared == "str" && (cls == "word" || cls == "str");
   }
 
   const Bind *bind(const Node &n, std::string_view key) {
@@ -496,19 +589,28 @@ struct Emit {
         }
       }
       for (const Attr &a : n.attrs) {
-        bool known = false;
+        const InParam *param = nullptr;
         for (const InParam &p : t.ins) {
           if (p.name == a.name) {
-            known = true;
+            param = &p;
             break;
           }
         }
-        if (!known) {
+        if (param == nullptr) {
           diags.push_back({m.name, a.line, 0,
                            "'" + t.name + "' has no param '" + a.name +
                                "' (arg ignored)",
                            Diag::Severity::kWarning});
           continue;
+        }
+        // the args are TYPED: the value's form (or the referenced outer
+        // param's declared type) must match the declaration
+        const std::string cls = valueType(a.value);
+        if (!typeCompatible(param->type, cls)) {
+          err(a.line, "arg '" + a.name + "' of '" + t.name + "' is " +
+                          param->type + ", got " +
+                          (cls.empty() ? "nothing" : cls) + " '" + a.value +
+                          "'");
         }
         // arg values may reference the OUTER instantiation's params
         env[a.name] = substitute(a.value);
@@ -524,11 +626,13 @@ struct Emit {
       }
       solveLine("// >>> " + t.name + " :" + std::to_string(n.line));
       envStack.push_back(std::move(env));
+      declStack.push_back(&t);
       ++instanceDepth;
       for (const NodePtr &b : t.body) {
         solveInto(out, *b, pw, ph, cursor, mainAxis);
       }
       --instanceDepth;
+      declStack.pop_back();
       envStack.pop_back();
       solveLine("// <<< " + t.name);
       return;
@@ -668,7 +772,8 @@ struct Emit {
         const SolvedW &cw = *sw.kids[k];
         const std::string cs = std::to_string(cw.idx);
         const std::string *cvis = get(cw.attrs, "visible");
-        const bool hidden = cvis != nullptr && *cvis == "0";
+        const bool hidden =
+            cvis != nullptr && (*cvis == "0" || *cvis == "false");
         // a BOUND visible gates occupancy at RUNTIME under the same
         // flags — the one-shot equivalent of a visibility toggle +
         // re-solve (this IS the emergent reflow)
@@ -738,7 +843,8 @@ struct Emit {
     }
 
     const std::string *vis = get(sw.attrs, "visible");
-    const bool hidden = vis != nullptr && *vis == "0";
+    const bool hidden =
+        vis != nullptr && (*vis == "0" || *vis == "false");
     if (hidden) {
       // visible: 0 gates the SUBTREE's drawing (solved for occupancy)
       drawLine("// hidden subtree (visible: 0) :" +

@@ -324,6 +324,66 @@ TEST(UicEmit, StructuralIfLowersToAbsenceGuards) {
   EXPECT_EQ(h.find("SKIP"), std::string::npos); // nothing degraded
 }
 
+TEST(UicEmit, LabelsDrawRunsAndTheManifestNamesTheirFonts) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h;\n"
+      "    label { content: \"1998\"; font: dyn_bold_11; color: 1 1 1;\n"
+      "            textalign: center; textvalign: center; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // the font is a host resource named by the module, like a texture
+  EXPECT_NE(h.find("FontRef kpanel_fonts[] = {"), std::string::npos);
+  EXPECT_NE(h.find("\"dyn_bold_11\"},"), std::string::npos);
+  // the run: measured by the SINK (layout and ink cannot disagree),
+  // centered by the ceil law, pen on the baseline
+  EXPECT_NE(h.find("const float tw1 = sink.measure("), std::string::npos);
+  EXPECT_NE(h.find("std::ceil((w1 - tw1) / 2)"), std::string::npos);
+  EXPECT_NE(h.find("std::ceil((h1 - lh1) / 2)"), std::string::npos);
+  EXPECT_NE(h.find("+ sink.ascent("), std::string::npos);
+  EXPECT_NE(h.find("sink.text(pen1, \"1998\","), std::string::npos);
+}
+
+TEST(UicEmit, FitxLabelsMeasureInTheSolve) {
+  // the fitx solve: a fitx label's WIDTH is its text —
+  // layout asks the sink, so the solve carries the measure
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h; grow: 1; float: right;\n"
+      "    label { content: \"43861\"; font: dyn_bold_11; fitx: 1;\n"
+      "            fitxpadding: 0.5h; }\n"
+      "    image { texture: /art/star.img; width: 2h; height: 2h; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("w1 = sink.measure("), std::string::npos);
+  EXPECT_NE(h.find("w1 += "), std::string::npos); // fitxpadding
+  // and the measured width feeds the chain: the icon follows the text
+  EXPECT_NE(h.find("tx0 = x1; ty0 = y1; tw0 = w1;"), std::string::npos);
+}
+
+TEST(UicEmit, OutlinedLabelsPreferTheStroker) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { label { content: \"0s\"; font: dyn_bold_30; outline: 1;\n"
+      "                outlinecolor: 0 0 0 .6; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("if (sink.outline_width("), std::string::npos);
+  EXPECT_NE(h.find("sink.text_stroked(pen1,"), std::string::npos);
+  EXPECT_NE(h.find("0.600000024f}"), std::string::npos); // the outline color
+}
+
+TEST(UicEmit, AnUnfontedUncoloredLabelIsGray) {
+  // an untextured widget with no color is GRAY
+  std::vector<uic::Diag> diags;
+  const std::string h = emit("panel { label { content: \"-\"; } }\n", &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("\"system_medium\"},"), std::string::npos); // the default
+  EXPECT_NE(h.find("ui::Color{0.5f, 0.5f, 0.5f, 1.0f}"), std::string::npos);
+}
+
 TEST(UicEmit, ButtonsRenderTheirRestingState) {
   // buttons are containers; only the 'up' widgetstate renders in the
   // static build, and states never union, chain, or become targets

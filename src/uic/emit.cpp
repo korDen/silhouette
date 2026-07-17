@@ -207,6 +207,8 @@ struct Emit {
   std::ostringstream decl, solve, draw;
   std::map<std::string, uint32_t> texIds;
   std::vector<std::string> texOrder;
+  std::map<std::string, uint32_t> fontIds; // name -> id (content hash)
+  std::vector<std::string> fontOrder;
   std::map<std::string, std::string> assetConsts;
   std::map<std::string, const StyleDecl *> styles;
   std::map<std::string, const TemplateDecl *> templates;
@@ -264,6 +266,20 @@ struct Emit {
     char buf[16];
     std::snprintf(buf, sizeof buf, "0x%08Xu", texId(path, atLine));
     return std::string(buf) + " /* " + path + " */";
+  }
+
+  // fonts are host resources exactly like textures: the module names
+  // them, the manifest hands the host {id, name}, and the host
+  // registers whatever face/size that name means to it
+  std::string fontIdExpr(const std::string &name) {
+    auto it = fontIds.find(name);
+    if (it == fontIds.end()) {
+      it = fontIds.emplace(name, contentHash(name)).first;
+      fontOrder.push_back(name);
+    }
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "0x%08Xu", it->second);
+    return std::string(buf) + " /* " + name + " */";
   }
 
   // ---- expressions (binds) ----------------------------------------------
@@ -585,7 +601,7 @@ struct Emit {
     }
     if (!isState &&
         n.tag != "panel" && n.tag != "image" && n.tag != "frame" &&
-        n.tag != "button") {
+        n.tag != "button" && n.tag != "label") {
       auto tpl = templates.find(n.tag);
       if (tpl == templates.end()) {
         skip(n.line, "widget '" + n.tag + "'");
@@ -713,6 +729,15 @@ struct Emit {
     }
     solveLine(vw + " = " + wE + ";");
     solveLine(vh + " = " + hE + ";");
+    // the fitx solve law: a fitx label
+    // sizes to clamp(textWidth, fitxmin, fitxmax) + fitxpadding, fity
+    // to lineHeight + fitypadding — UNROUNDED, and re-run on every
+    // pass (the reset-to-base above happens every pass too). The sink
+    // is the font authority, so the SOLVE asks it: layout and ink can
+    // never disagree.
+    if (n.tag == "label") {
+      emitLabelFit(sw, vw, vh, pw, ph);
+    }
 
     // ---- children (before position: a grown size feeds the align)
     solveChildren(sw, vw, vh, grows);
@@ -787,6 +812,169 @@ struct Emit {
     } else {
       plainPosition();
     }
+  }
+
+  // ---- labels -------------------------------------------------------------
+
+  // a label's text: the `content` attr, or a bound expression (a
+  // snapshot value formatted by the host). Both are borrowed for the
+  // duration of the sink call (the Sink's string-lifetime contract).
+  std::string textExpr(const SolvedW &sw) {
+    if (auto b = sw.binds.find("content"); b != sw.binds.end()) {
+      return b->second;
+    }
+    const std::string *c = get(sw.attrs, "content");
+    return c == nullptr ? std::string("\"\"") : quotedLit(*c);
+  }
+
+  // attr values arrive verbatim, so a TEXT value already wears its
+  // quotes (the quoting law: only text is quoted) — and .ui escapes
+  // \" and \\ are C++'s. Anything else (a folded param, a bare word)
+  // becomes a literal here.
+  static std::string quotedLit(const std::string &s) {
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
+      return s;
+    }
+    std::string out = "\"";
+    for (const char c : s) {
+      if (c == '"' || c == '\\') {
+        out += '\\';
+      }
+      out += c;
+    }
+    return out + "\"";
+  }
+
+  std::string fontOf(const SolvedW &sw) {
+    const std::string *f = get(sw.attrs, "font");
+    // the default font resource for an unfonted label
+    return fontIdExpr(f != nullptr ? *f : std::string("system_medium"));
+  }
+
+  void emitLabelFit(const SolvedW &sw, const std::string &vw,
+                    const std::string &vh, const std::string &pw,
+                    const std::string &ph) {
+    const bool fitX = flag(sw.attrs, "fitx", false);
+    const bool fitY = flag(sw.attrs, "fity", false);
+    if (!fitX && !fitY) {
+      return;
+    }
+    const std::string font = fontOf(sw);
+    auto sizeAttr = [&](const char *key, bool horizontal) -> std::string {
+      const std::string *v = get(sw.attrs, key);
+      if (v == nullptr) {
+        return "";
+      }
+      return dimExpr(parseDim(*v), horizontal, pw, ph, false);
+    };
+    if (fitX) {
+      solveLine(vw + " = sink.measure(" + font + ", " + textExpr(sw) + ");");
+      const std::string mn = sizeAttr("fitxmin", true);
+      const std::string mx = sizeAttr("fitxmax", true);
+      if (!mn.empty()) {
+        solveLine(vw + " = std::max(" + vw + ", " + mn + ");");
+      }
+      if (!mx.empty()) {
+        solveLine(vw + " = std::min(" + vw + ", " + mx + ");");
+      }
+      const std::string pad = sizeAttr("fitxpadding", true);
+      if (!pad.empty()) {
+        solveLine(vw + " += " + pad + ";");
+      }
+    }
+    if (fitY) {
+      solveLine(vh + " = sink.line_height(" + font + ");");
+      const std::string mn = sizeAttr("fitymin", false);
+      const std::string mx = sizeAttr("fitymax", false);
+      if (!mn.empty()) {
+        solveLine(vh + " = std::max(" + vh + ", " + mn + ");");
+      }
+      if (!mx.empty()) {
+        solveLine(vh + " = std::min(" + vh + ", " + mx + ");");
+      }
+      const std::string pad = sizeAttr("fitypadding", false);
+      if (!pad.empty()) {
+        solveLine(vh + " += " + pad + ";");
+      }
+    }
+  }
+
+  // Label draw: align the run in the widget's box, put the pen on the
+  // baseline, and draw the shadow/outline pass under it.
+  void emitLabel(const SolvedW &sw, const std::string &ax,
+                 const std::string &ay, const std::string &w,
+                 const std::string &h) {
+    const std::map<std::string, std::string> &bag = sw.attrs;
+    const std::string font = fontOf(sw);
+    const std::string text = textExpr(sw);
+    const std::string sfx = std::to_string(sw.idx);
+    const std::string tw = "tw" + sfx, lh = "lh" + sfx;
+    drawLine("const float " + tw + " = sink.measure(" + font + ", " + text +
+             ");");
+    const std::string *lhAttr = get(bag, "lineheight");
+    drawLine("const float " + lh + " = " +
+             (lhAttr != nullptr
+                  ? "R(" + dimExpr(parseDim(*lhAttr), false, w, h, false) + ")"
+                  : "sink.line_height(" + font + ")") +
+             ";");
+
+    const std::string *ta = get(bag, "textalign");
+    std::string tx = ax;
+    if (ta != nullptr && *ta == "center") {
+      tx = ax + " + std::ceil((" + w + " - " + tw + ") / 2)";
+    } else if (ta != nullptr && *ta == "right") {
+      tx = ax + " + std::ceil(" + w + " - " + tw + ")";
+    }
+    const std::string *tva = get(bag, "textvalign");
+    std::string ty = ay;
+    if (tva != nullptr && *tva == "center") {
+      ty = ay + " + std::ceil((" + h + " - " + lh + ") / 2)";
+    } else if (tva != nullptr && *tva == "bottom") {
+      ty = ay + " + std::ceil(" + h + " - " + lh + ")";
+    }
+    drawLine("const ui::Vec2 pen" + sfx + "{" + tx + ", " + ty +
+             " + sink.ascent(" + font + ")};");
+
+    // an untextured label with no color is GRAY, not white
+    const std::string col = colorLiteral(bag, sw.node->line, 0.5f);
+    const bool outline = flag(bag, "outline", false);
+    const bool shadow = !outline && flag(bag, "shadow", false);
+    if (outline || shadow) {
+      const std::string *offAttr =
+          get(bag, outline ? "outlineoffset" : "shadowoffset");
+      std::string off = offAttr != nullptr ? *offAttr : "1";
+      if (const std::string *ox = get(bag, "shadowoffsetx");
+          ox != nullptr && *ox != "0") {
+        off = *ox;
+      }
+      float c[4] = {0, 0, 0, 1};
+      if (const std::string *sc =
+              get(bag, outline ? "outlinecolor" : "shadowcolor");
+          sc != nullptr) {
+        parseColor(*sc, c);
+      }
+      const std::string scol = "ui::Color{" + ftos(c[0]) + ", " + ftos(c[1]) +
+                               ", " + ftos(c[2]) + ", " + ftos(c[3]) + "}";
+      if (outline) {
+        // the stroked variants where the font declares a stroker, else
+        // the offset copy
+        drawLine("if (sink.outline_width(" + font + ") > 0) {");
+        drawLine("  sink.text_stroked(pen" + sfx + ", " + text + ", " + font +
+                 ", " + scol + ", ui::kNoClip);");
+        drawLine("} else {");
+        drawLine("  sink.text({pen" + sfx + ".x + " + ftos(std::strtof(off.c_str(), nullptr)) +
+                 ", pen" + sfx + ".y + " + ftos(std::strtof(off.c_str(), nullptr)) +
+                 "}, " + text + ", " + font + ", " + scol + ", ui::kNoClip);");
+        drawLine("}");
+      } else {
+        drawLine("sink.text({pen" + sfx + ".x + " +
+                 ftos(std::strtof(off.c_str(), nullptr)) + ", pen" + sfx +
+                 ".y + " + ftos(std::strtof(off.c_str(), nullptr)) + "}, " +
+                 text + ", " + font + ", " + scol + ", ui::kNoClip);");
+      }
+    }
+    drawLine("sink.text(pen" + sfx + ", " + text + ", " + font + ", " + col +
+             ", ui::kNoClip);");
   }
 
   void solveChildren(SolvedW &sw, const std::string &vw,
@@ -983,6 +1171,10 @@ struct Emit {
     const std::map<std::string, std::string> &bag = sw.attrs;
     const std::string dst =
         "{" + ax + ", " + ay + ", " + w + ", " + h + "}";
+    if (n.tag == "label") {
+      emitLabel(sw, ax, ay, w, h);
+      return;
+    }
     if (n.tag == "frame") {
       const std::string *tex = get(bag, "texture");
       if (tex == nullptr) {
@@ -1162,6 +1354,16 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
     char idbuf[16];
     std::snprintf(idbuf, sizeof idbuf, "0x%08Xu", e.texIds[path]);
     os << "  {" << idbuf << ", \"" << path << "\"},\n";
+  }
+  os << "};\n\n"
+     << "// the same for fonts: the module NAMES them (the host decides\n"
+     << "// what face/size each name is) and asks the sink to measure\n"
+     << "struct FontRef { ui::FontId id; std::string_view name; };\n"
+     << "inline constexpr FontRef k" << fn << "_fonts[] = {\n";
+  for (const std::string &name : e.fontOrder) {
+    char idbuf[16];
+    std::snprintf(idbuf, sizeof idbuf, "0x%08Xu", e.fontIds[name]);
+    os << "  {" << idbuf << ", \"" << name << "\"},\n";
   }
   os << "};\n\n"
      << "template <class Sink>\n"

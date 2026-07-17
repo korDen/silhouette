@@ -384,6 +384,29 @@ TEST(UicEmit, NumbersRenderIntoRunsWithoutInterpolation) {
             std::string::npos);
 }
 
+TEST(UicEmit, FmtComposesARunFromAFormatAndArgs) {
+  // the composed-run answer: fmt("{} / {}", a, b) fills each hole with
+  // the next arg. Still no interpolation in the LANGUAGE — a call whose
+  // result IS the run, its buffer a local.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h;\n"
+      "    label { bind content: fmt(\"{} / {}\", snapshot.unit.hp,\n"
+      "                              snapshot.unit.hpMax); font: dyn_9; }\n"
+      "    label { bind content: fmt(\"+{}\", snapshot.unit.hpRegen);\n"
+      "            font: dyn_9; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("gen_detail::fmt(\"{} / {}\", (s.unit.hp), (s.unit.hpMax))"),
+            std::string::npos);
+  EXPECT_NE(h.find("gen_detail::fmt(\"+{}\", (s.unit.hpRegen))"),
+            std::string::npos);
+  EXPECT_NE(h.find("const auto src1 = gen_detail::fmt("), std::string::npos);
+  EXPECT_NE(h.find("sink.text(pen1, gen_detail::sv(src1),"),
+            std::string::npos);
+}
+
 TEST(UicEmit, OutlinedLabelsPreferTheStroker) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(
@@ -428,6 +451,30 @@ TEST(UicEmit, AlphaMasksCutTheirWidgetToShape) {
   // a real texture wears the same mask
   EXPECT_NE(h.find("/ui/mask/square_cutout.tga */, ui::kNoClip);"),
             std::string::npos);
+}
+
+TEST(UicEmit, TheDialectsSolidTexelsAreFillsNotArt) {
+  // $white / $black are the dialect's solid texels — fills, never
+  // manifest entries (a host cannot load "$black" from its tree)
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 4h; height: 4h;\n"
+      "    image { texture: $black; }\n"
+      "    image { texture: $white; }\n"
+      "    image { texture: $invis; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_EQ(h.find("\"$black\""), std::string::npos);
+  EXPECT_EQ(h.find("\"$white\""), std::string::npos);
+  // unpainted: $black fills black, $white white, $invis nothing
+  EXPECT_NE(h.find("sink.quad({ax1, ay1, w1, h1}, "
+                   "ui::Color{0.0f, 0.0f, 0.0f, 1.0f}"),
+            std::string::npos);
+  EXPECT_NE(h.find("sink.quad({ax2, ay2, w2, h2}, "
+                   "ui::Color{1.0f, 1.0f, 1.0f, 1.0f}"),
+            std::string::npos);
+  EXPECT_EQ(h.find("ax3, ay3"), std::string::npos);
 }
 
 TEST(UicEmit, AStyleNameCanComeFromAParam) {

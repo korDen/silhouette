@@ -368,7 +368,20 @@ struct Emit {
         return "gen_detail::fixed((double)(" + expr(*e.args[1]) + "), (int)(" +
                expr(*e.args[2]) + "))";
       }
-      err(e.line, "call in bind (subset builtins: fracf, num, fixed, ord)");
+      // fmt("{} / {}", a, b): a format literal, then one arg per {}
+      if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "fmt") {
+        if (e.args.size() < 2 || e.args[1]->kind != Expr::kString) {
+          err(e.line, "fmt takes (\"literal with {}\", args...)");
+          return "0";
+        }
+        std::string out = "gen_detail::fmt(" + quotedLit(e.args[1]->text);
+        for (size_t i = 2; i < e.args.size(); ++i) {
+          out += ", (" + expr(*e.args[i]) + ")";
+        }
+        return out + ")";
+      }
+      err(e.line,
+          "call in bind (subset builtins: fracf, num, fixed, ord, fmt)");
       return "0";
     case Expr::kUnary:
       return "(" + e.text + expr(*e.args[0]) + ")";
@@ -1278,7 +1291,11 @@ struct Emit {
     if (tex != nullptr && *tex == "$invis") {
       return; // the dialect law: $invis draws nothing
     }
-    if (boundTex || (tex != nullptr && *tex != "$white")) {
+    // the dialect's solid texels: $white and $black are fills, not art
+    // (a mask cuts them to shape — that IS the stencil pattern)
+    const bool solid =
+        tex != nullptr && (*tex == "$white" || *tex == "$black");
+    if (boundTex || (tex != nullptr && !solid)) {
       std::string idExpr;
       if (boundTex) {
         idExpr = texBind->second;
@@ -1309,19 +1326,17 @@ struct Emit {
                maskOf(bag, n.line) + ", ui::kNoClip);");
       return;
     }
-    // $white is the solid texel: a fill that an alpha mask can cut to
-    // shape, which is how the source material stencils its slots
-    if (get(bag, "color") != nullptr ||
-        (tex != nullptr && *tex == "$white")) {
+    if (get(bag, "color") != nullptr || solid) {
+      // an unpainted $black fills black, an unpainted $white white
+      const float def = tex != nullptr && *tex == "$black" ? 0.0f : 1.0f;
+      const std::string col = colorLiteral(bag, n.line, def);
       const std::string mask = maskOf(bag, n.line);
       if (mask != "0") {
-        drawLine("sink.image(" + dst + ", 0, {0, 0, 1, 1}, " +
-                 colorLiteral(bag, n.line, 1) + ", 0, " + mask +
-                 ", ui::kNoClip);");
+        drawLine("sink.image(" + dst + ", 0, {0, 0, 1, 1}, " + col + ", 0, " +
+                 mask + ", ui::kNoClip);");
         return;
       }
-      drawLine("sink.quad(" + dst + ", " + colorLiteral(bag, n.line, 1) +
-               ", 0, ui::kNoClip);");
+      drawLine("sink.quad(" + dst + ", " + col + ", 0, ui::kNoClip);");
     }
   }
 
@@ -1422,7 +1437,8 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "#include <cstddef>\n"
      << "#include <cstdint>\n"
      << "#include <cstdio>\n"
-     << "#include <string_view>\n\n"
+     << "#include <string_view>\n"
+     << "#include <type_traits>\n\n"
      << "namespace " << opt.ns << " {\n"
      << "namespace gen_detail {\n"
      << "// Round: floor(f + 0.5), applied per widget\n"
@@ -1441,26 +1457,64 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "inline std::string_view sv(std::string_view s) { return s; }\n"
      << "// A number rendered into a text run. The LANGUAGE has no string\n"
      << "// interpolation; these are the compiler's typed conversions at\n"
-     << "// a text sink — num(v) and fixed(v, decimals). The buffer is a\n"
+     << "// a text sink — num(v), fixed(v, decimals), and fmt(\"{} / {}\",\n"
+     << "// ...) that fills each {} with the next arg. The buffer is a\n"
      << "// value with automatic storage: no allocation, and the run is\n"
      << "// borrowed from a live local exactly like every other run.\n"
      << "struct TextBuf {\n"
-     << "  char b[24];\n"
+     << "  char b[64];\n"
      << "  int n = 0;\n"
+     << "  void put(char c) { if (n < (int)sizeof b) b[n++] = c; }\n"
+     << "  void put(std::string_view s) { for (char c : s) put(c); }\n"
      << "};\n"
      << "inline std::string_view sv(const TextBuf &t) {\n"
      << "  return std::string_view(t.b, (size_t)t.n);\n"
      << "}\n"
      << "inline TextBuf num(long long v) {\n"
      << "  TextBuf t;\n"
-     << "  t.n = std::snprintf(t.b, sizeof t.b, \"%lld\", v);\n"
-     << "  if (t.n < 0) { t.n = 0; }\n"
+     << "  char tmp[24];\n"
+     << "  t.put(std::string_view(tmp, (size_t)std::max(0,\n"
+     << "        std::snprintf(tmp, sizeof tmp, \"%lld\", v))));\n"
      << "  return t;\n"
      << "}\n"
      << "inline TextBuf fixed(double v, int decimals) {\n"
      << "  TextBuf t;\n"
-     << "  t.n = std::snprintf(t.b, sizeof t.b, \"%.*f\", decimals, v);\n"
-     << "  if (t.n < 0) { t.n = 0; }\n"
+     << "  char tmp[32];\n"
+     << "  t.put(std::string_view(tmp, (size_t)std::max(0,\n"
+     << "        std::snprintf(tmp, sizeof tmp, \"%.*f\", decimals, v))));\n"
+     << "  return t;\n"
+     << "}\n"
+     << "// one fmt argument -> the buffer, by type\n"
+     << "inline void fmt_one(TextBuf &t, std::string_view s) { t.put(s); }\n"
+     << "template <std::size_t N>\n"
+     << "inline void fmt_one(TextBuf &t, const std::array<char, N> &a) {\n"
+     << "  t.put(sv(a));\n"
+     << "}\n"
+     << "template <class T>\n"
+     << "inline void fmt_one(TextBuf &t, T v) {\n"
+     << "  char tmp[32];\n"
+     << "  if constexpr (std::is_floating_point_v<T>) {\n"
+     << "    t.put(std::string_view(tmp, (size_t)std::max(0,\n"
+     << "          std::snprintf(tmp, sizeof tmp, \"%g\", (double)v))));\n"
+     << "  } else {\n"
+     << "    t.put(std::string_view(tmp, (size_t)std::max(0,\n"
+     << "          std::snprintf(tmp, sizeof tmp, \"%lld\", (long long)v))));\n"
+     << "  }\n"
+     << "}\n"
+     << "inline void fmt_into(TextBuf &t, std::string_view f) { t.put(f); }\n"
+     << "template <class A, class... Rest>\n"
+     << "inline void fmt_into(TextBuf &t, std::string_view f, const A &a,\n"
+     << "                     const Rest &...rest) {\n"
+     << "  const std::size_t h = f.find(\"{}\");\n"
+     << "  if (h == std::string_view::npos) { t.put(f); return; }\n"
+     << "  t.put(f.substr(0, h));\n"
+     << "  fmt_one(t, a);\n"
+     << "  fmt_into(t, f.substr(h + 2), rest...);\n"
+     << "}\n"
+     << "template <class... Args>\n"
+     << "inline TextBuf fmt(std::string_view f, const Args &...args) {\n"
+     << "  TextBuf t;\n"
+     << "  fmt_into(t, f, args...);\n"
      << "  return t;\n"
      << "}\n"
      << "} // namespace gen_detail\n\n";

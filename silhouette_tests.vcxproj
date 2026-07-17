@@ -13,8 +13,10 @@
     <ClCompile Include="tests\quality_text_test.cpp" />
     <ClCompile Include="tests\uic_parse_test.cpp" />
     <ClCompile Include="tests\uic_schema_test.cpp" />
+    <ClCompile Include="tests\uic_emit_test.cpp" />
     <ClCompile Include="src\uic\parse.cpp" />
     <ClCompile Include="src\uic\schema.cpp" />
+    <ClCompile Include="src\uic\emit.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\uic\lex.hpp" />

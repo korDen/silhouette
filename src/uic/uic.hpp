@@ -33,4 +33,18 @@ std::string dumpModule(const Module &m);
 std::string emitSchemaHeader(const Module &m, std::string_view ns,
                              std::vector<Diag> &diags);
 
+// The emit pass (absolute subset — src/uic/emit.cpp documents the
+// laws): a panel module becomes a self-contained header with
+//   template <class Sink> void <module>(const UiSnapshot&, float, float,
+//   Sink&)
+// plus the {id, path} texture manifest. With assetRoot set, every
+// authored path (frame families expanded) must exist on disk.
+struct EmitOptions {
+  std::string ns = "hud";
+  std::string schemaInclude = "generated/UiSnapshot.h";
+  std::string assetRoot; // empty = skip validation
+};
+std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
+                            std::vector<Diag> &diags);
+
 } // namespace uic

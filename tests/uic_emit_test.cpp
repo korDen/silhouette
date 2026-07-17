@@ -452,9 +452,10 @@ TEST(UicEmit, MatchOverAnEnumPicksAndValidatesEachArm) {
   EXPECT_EQ(h.find("match"), std::string::npos); // resolved, not emitted
 }
 
-TEST(UicEmit, AnInlineEnumComparisonLowersToSids) {
-  // an inline-enum param and a bare value both become sid()s in a bind, so
-  // it's a uint32_t compare that folds at compile time (no shared type)
+TEST(UicEmit, AnInlineEnumComparisonLowersToNamedIds) {
+  // an inline-enum param and a bare value both become the schema's UPPER
+  // id constant in a bind — a uint32_t compare that folds at compile time
+  // (no shared type; the constant is defined in the schema header)
   std::vector<uic::Diag> diags;
   const std::string h = emit("template slot { in shape: round | square;\n"
                              "    image { texture: /art/x.tga;\n"
@@ -462,7 +463,7 @@ TEST(UicEmit, AnInlineEnumComparisonLowersToSids) {
                              "panel { slot { shape: square; } }\n",
                              &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  EXPECT_NE(h.find("sid(\"square\") == sid(\"square\")"), std::string::npos);
+  EXPECT_NE(h.find("SQUARE == SQUARE"), std::string::npos);
 }
 
 TEST(UicEmit, ComparingTwoDifferentEnumSetsIsLoud) {

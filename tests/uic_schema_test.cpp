@@ -45,8 +45,10 @@ TEST(UicSchema, AnInlineEnumFieldIsAUint32Sid) {
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   EXPECT_NE(h.find("constexpr uint32_t sid(const char *s)"),
             std::string::npos);
-  EXPECT_NE(h.find("uint32_t primary = sid(\"solid\");"),
+  // one named UPPER constant per value, and the field defaults to one
+  EXPECT_NE(h.find("inline constexpr uint32_t SOLID = sid(\"solid\");"),
             std::string::npos);
+  EXPECT_NE(h.find("uint32_t primary = SOLID;"), std::string::npos);
 }
 
 TEST(UicSchema, CollidingSidValuesAreLoud) {

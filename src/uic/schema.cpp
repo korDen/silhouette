@@ -8,7 +8,9 @@
 // the renderer" is machine-enforced, not a convention.
 #include "uic/uic.hpp"
 
+#include <cctype>
 #include <cstdint>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -114,6 +116,37 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
      << "  return h;\n"
      << "}\n\n";
 
+  // one named constant per inline-enum value across the whole schema —
+  // UPPER so it can't shadow the lowercase fields, `inline` so a widely
+  // included header doesn't warn on the unused ones. A bind reads
+  // `unit.primary == SOLID`; this is that constant's single home.
+  {
+    std::map<std::string, std::string> byName; // UPPER -> value
+    for (const StructDecl &s : m.structs) {
+      for (const StructField &f : s.fields) {
+        for (const std::string &v : f.enumValues) {
+          std::string up = v;
+          for (char &c : up) {
+            c = static_cast<char>(std::toupper((unsigned char)c));
+          }
+          const auto ins = byName.emplace(up, v);
+          if (!ins.second && ins.first->second != v) {
+            diags.push_back({m.name, f.line, 0,
+                             "enum values '" + ins.first->second + "' and '" +
+                             v + "' share the constant '" + up + "'"});
+          }
+        }
+      }
+    }
+    for (const auto &nv : byName) {
+      os << "inline constexpr uint32_t " << nv.first << " = sid(\""
+         << nv.second << "\");\n";
+    }
+    if (!byName.empty()) {
+      os << "\n";
+    }
+  }
+
   for (const EnumDecl &e : m.enums) {
     os << "enum class " << e.name << " : int32_t {\n";
     for (const EnumEntry &entry : e.entries) {
@@ -138,7 +171,11 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
         os << t.cpp << ' ' << f.name;
         if (f.hasDefault) {
           if (f.isEnum()) {
-            os << " = sid(\"" << f.defaultValue << "\")";
+            std::string up = f.defaultValue;
+            for (char &c : up) {
+              c = static_cast<char>(std::toupper((unsigned char)c));
+            }
+            os << " = " << up; // the named constant emitted above
           } else if (t.isEnum) {
             os << " = " << f.type << "::" << f.defaultValue;
           } else {

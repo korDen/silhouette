@@ -310,16 +310,25 @@ struct Emit {
     return nullptr;
   }
 
-  // one operand of an inline-enum comparison: a bare VALUE lowers to its
-  // sid (validated against the set); the param and a uint32_t field
-  // defer to expr() (the param folds to a sid there, the field already
-  // IS a sid)
+  static std::string upper(const std::string &s) {
+    std::string u = s;
+    for (char &c : u) {
+      c = static_cast<char>(std::toupper((unsigned char)c));
+    }
+    return u;
+  }
+
+  // one operand of an inline-enum comparison: a bare VALUE lowers to the
+  // schema's named constant (its UPPER, matched case-insensitively so a
+  // consumer's SOLID and hand .ui's solid both land there); the param
+  // and a uint32_t field defer to expr() (the param folds to the constant
+  // there, the field already IS a sid)
   std::string exprEnum(const Expr &e, const std::vector<std::string> *set) {
     if (e.kind == Expr::kIdent && e.text != "snapshot" &&
         inlineEnumSet(e) == nullptr && substitute(e.text) == e.text) {
       for (const std::string &v : *set) {
-        if (v == e.text) {
-          return "sid(\"" + e.text + "\")";
+        if (upper(v) == upper(e.text)) {
+          return upper(v);
         }
       }
       err(e.line, "'" + e.text + "' is not a value of this enum");
@@ -334,9 +343,9 @@ struct Emit {
       if (e.text == "snapshot") {
         return "s";
       }
-      // an inline-enum param folds to its string id (a uint32_t)
+      // an inline-enum param folds to the schema's named id constant
       if (inlineEnumSet(e) != nullptr) {
-        return "sid(\"" + substitute(e.text) + "\")";
+        return upper(substitute(e.text));
       }
       // a template parameter: the folded argument substitutes (typed
       // params — the value must itself be a valid expression)
@@ -389,6 +398,17 @@ struct Emit {
           return "0";
         }
         return "gen_detail::num((long long)(" + expr(*e.args[1]) + "))";
+      }
+      // sid("value") — a string id, the schema's constexpr. Passed
+      // through verbatim so the same call yields the same uint32_t in a
+      // bind as it does populating the snapshot (a patch writes the
+      // explicit form; hand .ui can also just write the bare enum value)
+      if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "sid") {
+        if (e.args.size() != 2 || e.args[1]->kind != Expr::kString) {
+          err(e.line, "sid takes (\"value\")");
+          return "0";
+        }
+        return "sid(" + quotedLit(e.args[1]->text) + ")";
       }
       // an enum's ordinal: the one bridge between a typed schema enum
       // and the plain numbers a folded template param carries

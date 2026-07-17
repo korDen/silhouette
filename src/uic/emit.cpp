@@ -118,6 +118,43 @@ bool parseColor(const std::string &s, float out[4]) {
     out[3] = s.size() == 9 ? hex(7) : 1.f;
     return true;
   }
+  // rgb(r, g, b) / rgba(r, g, b, a): the parenthesized literal. The channels
+  // are parsed like the bare-float form (commas are just separators), so a
+  // stray count (rgb with 4, rgba with 3) is rejected.
+  if (s.compare(0, 4, "rgb(") == 0 || s.compare(0, 5, "rgba(") == 0) {
+    const bool hasA = s[3] == 'a';
+    const size_t open = s.find('(');
+    const size_t close = s.rfind(')');
+    if (close == std::string::npos || close <= open) {
+      return false;
+    }
+    std::string inner = s.substr(open + 1, close - open - 1);
+    for (char &c : inner) {
+      if (c == ',') {
+        c = ' ';
+      }
+    }
+    const char *p = inner.c_str();
+    char *end = nullptr;
+    float v[4] = {0, 0, 0, 1};
+    int got = 0;
+    while (got < 4) {
+      const float f = std::strtof(p, &end);
+      if (end == p) {
+        break;
+      }
+      v[got++] = f;
+      p = end;
+    }
+    if (got != (hasA ? 4 : 3)) {
+      return false;
+    }
+    out[0] = v[0];
+    out[1] = v[1];
+    out[2] = v[2];
+    out[3] = hasA ? v[3] : 1.f;
+    return true;
+  }
   static const struct {
     const char *name;
     float r, g, b, a;
@@ -144,26 +181,8 @@ bool parseColor(const std::string &s, float out[4]) {
       return true;
     }
   }
-  const char *p = s.c_str();
-  char *end = nullptr;
-  float v[4] = {0, 0, 0, 1};
-  int got = 0;
-  while (got < 4) {
-    const float f = std::strtof(p, &end);
-    if (end == p) {
-      break;
-    }
-    v[got++] = f;
-    p = end;
-  }
-  if (got < 3) {
-    return false;
-  }
-  out[0] = v[0];
-  out[1] = v[1];
-  out[2] = v[2];
-  out[3] = v[3];
-  return true;
+  // no bare "r g b [a]" form: colours are rgb()/rgba(), #rrggbb[aa], or named.
+  return false;
 }
 
 // One solved widget INSTANCE — template bodies are shared AST nodes,
@@ -310,6 +329,30 @@ struct Emit {
     return nullptr;
   }
 
+  // the enclosing-instantiation param an atom names, if any (for its type)
+  const InParam *lookupParam(const std::string &name) const {
+    for (auto it = declStack.rbegin(); it != declStack.rend(); ++it) {
+      for (const InParam &p : (*it)->ins) {
+        if (p.name == name) {
+          return &p;
+        }
+      }
+    }
+    return nullptr;
+  }
+
+  // a colour value (#rrggbb, "r g b[ a]", or a named colour) as a ui::Color
+  // ctor — the form a bound colour needs (the static attr path uses the
+  // same parseColor but keeps its per-callsite default)
+  std::string colorFrom(const std::string &val, int line) {
+    float c[4] = {1, 1, 1, 1};
+    if (!parseColor(val, c)) {
+      err(line, "unparsable color '" + val + "'");
+    }
+    return "ui::Color{" + ftos(c[0]) + ", " + ftos(c[1]) + ", " + ftos(c[2]) +
+           ", " + ftos(c[3]) + "}";
+  }
+
   static std::string upper(const std::string &s) {
     std::string u = s;
     for (char &c : u) {
@@ -347,6 +390,12 @@ struct Emit {
       if (inlineEnumSet(e) != nullptr) {
         return upper(substitute(e.text));
       }
+      // a colour-typed param folds to its instance value as a ui::Color
+      // (so a bound colour can read the widget's own `color` param)
+      if (const InParam *p = lookupParam(e.text);
+          p != nullptr && p->type == "color") {
+        return colorFrom(substitute(e.text), e.line);
+      }
       // a template parameter: the folded argument substitutes (typed
       // params — the value must itself be a valid expression)
       const std::string sub = substitute(e.text);
@@ -366,9 +415,10 @@ struct Emit {
       return e.text;
     case Expr::kPath:
       return texIdExpr(e.text, e.line);
+    case Expr::kColor:
+      return colorFrom(e.text, e.line);
     case Expr::kString:
     case Expr::kDim:
-    case Expr::kColor:
       err(e.line, "literal kind not yet allowed in binds");
       return "0";
     case Expr::kField:
@@ -418,6 +468,23 @@ struct Emit {
           return "0";
         }
         return "(long long)(" + expr(*e.args[1]) + ")";
+      }
+      // rgb(r, g, b) / rgba(r, g, b, a): a colour built from expressions —
+      // the one way to spell a colour inside a bind (a bare "r g b a" is not
+      // one expression, and #rrggbb can't carry a computed channel). rgb is
+      // the opaque short form (alpha 1).
+      if (e.args[0]->kind == Expr::kIdent &&
+          (e.args[0]->text == "rgb" || e.args[0]->text == "rgba")) {
+        const bool hasA = e.args[0]->text == "rgba";
+        if (e.args.size() != (hasA ? 5u : 4u)) {
+          err(e.line, e.args[0]->text +
+                          (hasA ? " takes (r, g, b, a)" : " takes (r, g, b)"));
+          return "0";
+        }
+        const std::string a = hasA ? expr(*e.args[4]) : std::string("1");
+        return "ui::Color{(float)(" + expr(*e.args[1]) + "), (float)(" +
+               expr(*e.args[2]) + "), (float)(" + expr(*e.args[3]) +
+               "), (float)(" + a + ")}";
       }
       if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "fixed") {
         if (e.args.size() != 3) {
@@ -1140,7 +1207,7 @@ struct Emit {
              " + sink.ascent(" + font + ")};");
 
     // an untextured label with no color is GRAY, not white
-    const std::string col = colorLiteral(bag, sw.node->line, 0.5f);
+    const std::string col = colorLiteral(sw, 0.5f);
     const bool outline = flag(bag, "outline", false);
     const bool shadow = !outline && flag(bag, "shadow", false);
     if (outline || shadow) {
@@ -1354,12 +1421,16 @@ struct Emit {
     }
   }
 
-  std::string colorLiteral(const std::map<std::string, std::string> &bag,
-                           int line, float def) {
+  std::string colorLiteral(const SolvedW &sw, float def) {
+    // a bound colour wins over the static attr: the transpiled expr already
+    // evaluates to a ui::Color (a colour-typed param / color(...) / #hex)
+    if (auto b = sw.binds.find("color"); b != sw.binds.end()) {
+      return b->second;
+    }
     float c[4] = {def, def, def, 1};
-    if (const std::string *col = get(bag, "color")) {
+    if (const std::string *col = get(sw.attrs, "color")) {
       if (!parseColor(*col, c)) {
-        diags.push_back({m.name, line, 0,
+        diags.push_back({m.name, sw.node->line, 0,
                          "unparsable color '" + *col + "'",
                          Diag::Severity::kWarning});
       }
@@ -1421,7 +1492,7 @@ struct Emit {
           dimExpr(bt != nullptr ? parseDim(*bt) : parseDim("0"), false,
                   w, h, false) +
           ")";
-      const std::string col = colorLiteral(bag, n.line, 1);
+      const std::string col = colorLiteral(sw, 1);
       const size_t dot = tex->rfind('.');
       static const struct {
         const char *suffix;
@@ -1494,14 +1565,14 @@ struct Emit {
         flags = "ui::kTileU";
       }
       drawLine("sink.image(" + dst + ", " + idExpr + ", " + uv + ", " +
-               colorLiteral(bag, n.line, 1) + ", " + flags + ", " +
+               colorLiteral(sw, 1) + ", " + flags + ", " +
                maskOf(bag, n.line) + ", ui::kNoClip);");
       return;
     }
     if (get(bag, "color") != nullptr || solid) {
       // an unpainted $black fills black, an unpainted $white white
       const float def = tex != nullptr && *tex == "$black" ? 0.0f : 1.0f;
-      const std::string col = colorLiteral(bag, n.line, def);
+      const std::string col = colorLiteral(sw, def);
       const std::string mask = maskOf(bag, n.line);
       if (mask != "0") {
         drawLine("sink.image(" + dst + ", 0, {0, 0, 1, 1}, " + col + ", 0, " +

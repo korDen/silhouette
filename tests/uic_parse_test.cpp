@@ -23,14 +23,14 @@ TEST(UicParse, WidgetAttrsAreVerbatim) {
   const std::string d = dumpOf(
       "panel {\n"
       "    name: main_row; y: -.4h; grow: 1; float: right; height: 100%;\n"
-      "    color: 1 1 1 .15;\n"
+      "    color: rgba(1, 1, 1, .15);\n"
       "    texture: /art/frames/plate.img;\n"
       "    label { content: \"Ready\"; font: small_bold; }\n"
       "}\n");
   EXPECT_NE(d.find("widget panel"), std::string::npos);
   EXPECT_NE(d.find("attr name=`main_row`"), std::string::npos);
   EXPECT_NE(d.find("attr y=`-.4h`"), std::string::npos);
-  EXPECT_NE(d.find("attr color=`1 1 1 .15`"), std::string::npos);
+  EXPECT_NE(d.find("attr color=`rgba(1, 1, 1, .15)`"), std::string::npos);
   EXPECT_NE(d.find("attr texture=`/art/frames/plate.img`"),
             std::string::npos);
   EXPECT_NE(d.find("attr content=`\"Ready\"`"), std::string::npos);

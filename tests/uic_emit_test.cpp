@@ -45,7 +45,7 @@ TEST(UicEmit, AlignAndDeltaSizes) {
   const std::string h = emit(
       "panel { width: 100h; height: 20h;\n"
       "    panel { width: -2; height: -2; align: center; valign: bottom;\n"
-      "            color: 0 0 0 .85; }\n"
+      "            color: rgba(0, 0, 0, .85); }\n"
       "}\n",
       &diags);
   ASSERT_TRUE(diags.empty());
@@ -328,7 +328,7 @@ TEST(UicEmit, LabelsDrawRunsAndTheManifestNamesTheirFonts) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(
       "panel { width: 40h; height: 4h;\n"
-      "    label { content: \"1998\"; font: dyn_bold_11; color: 1 1 1;\n"
+      "    label { content: \"1998\"; font: dyn_bold_11; color: rgb(1, 1, 1);\n"
       "            textalign: center; textvalign: center; }\n"
       "}\n",
       &diags);
@@ -415,7 +415,7 @@ TEST(UicEmit, OutlinedLabelsPreferTheStroker) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(
       "panel { label { content: \"0s\"; font: dyn_bold_30; outline: 1;\n"
-      "                outlinecolor: 0 0 0 .6; } }\n",
+      "                outlinecolor: rgba(0, 0, 0, .6); } }\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   EXPECT_NE(h.find("if (sink.outline_width("), std::string::npos);
@@ -430,6 +430,30 @@ TEST(UicEmit, AnUnfontedUncoloredLabelIsGray) {
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   EXPECT_NE(h.find("\"system_medium\"},"), std::string::npos); // the default
   EXPECT_NE(h.find("ui::Color{0.5f, 0.5f, 0.5f, 1.0f}"), std::string::npos);
+}
+
+TEST(UicEmit, AColourBindPaintsFromAParamOrAColourLiteral) {
+  // a bound colour: `color` (a colour-typed param) folds to the instance's
+  // ui::Color, rgb(r,g,b) builds one from expressions (the only way to spell
+  // a colour inside a bind — a bare "r g b a" is not one expression), and
+  // the label's paint reads the whole ternary, not a static grey. The bare
+  // `color` is the param; `rgb(...)` is the builtin — no collision.
+  std::vector<uic::Diag> diags;
+  const std::string h =
+      emit("template chip { in color: color = white; in kind: warm | cool;\n"
+           "    label { content: \"-\";\n"
+           "        bind color: kind == warm ? color : rgb(0.9, 0.9, 0.9); } }\n"
+           "panel { chip { color: rgb(1, 0.37, 0.34); kind: warm; } }\n",
+           &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // the label's text paint is the whole ternary: the condition lowered to
+  // sids, `color` folded to the instance's ui::Color, color(...) built from
+  // exprs — and NOT the static unbound grey
+  EXPECT_NE(h.find("(WARM == WARM) ? ui::Color{1.0f, "), std::string::npos);
+  EXPECT_NE(h.find(": ui::Color{(float)(0.9), (float)(0.9), (float)(0.9), "
+                   "(float)(1)}"),
+            std::string::npos);
+  EXPECT_EQ(h.find("ui::Color{0.5f, 0.5f, 0.5f, 1.0f}"), std::string::npos);
 }
 
 TEST(UicEmit, MatchOverAnEnumPicksAndValidatesEachArm) {
@@ -512,8 +536,8 @@ TEST(UicEmit, AMatchOnANonAssetAttrIsNotFileChecked) {
   // arm's domain (a style decl) is validated by whoever owns styles.
   std::vector<uic::Diag> diags;
   const std::string h = emit(
-      "style round_frame_mask { color: 1 1 1 1; }\n"
-      "style square_frame_mask { color: 0 0 0 1; }\n"
+      "style round_frame_mask { color: rgb(1, 1, 1); }\n"
+      "style square_frame_mask { color: rgb(0, 0, 0); }\n"
       "template slot { in shape: round | square;\n"
       "    image { texture: /art/x.tga; style: match shape {\n"
       "        round: round_frame_mask;\n"
@@ -558,7 +582,7 @@ TEST(UicEmit, ATexturelessFrameDrawsItsBorder) {
   const std::string h = emit(
       "panel { width: 20h; height: 20h;\n"
       "    frame { color: invisible; borderthickness: 1;\n"
-      "            bordercolor: 0 0 0 1; } }\n",
+      "            bordercolor: rgb(0, 0, 0); } }\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   EXPECT_EQ(h.find("SKIP"), std::string::npos); // not skipped
@@ -579,7 +603,7 @@ TEST(UicEmit, AlphaMasksCutTheirWidgetToShape) {
       "style square_mask { usealphamask: 1;\n"
       "                  alphamaskfile: /ui/mask/square_cutout.tga; }\n"
       "panel { width: 4h; height: 4h;\n"
-      "    image { texture: $white; style: square_mask; color: 1 0 0 1; }\n"
+      "    image { texture: $white; style: square_mask; color: rgb(1, 0, 0); }\n"
       "    image { texture: /art/icon.img; style: square_mask; }\n"
       "}\n",
       &diags);
@@ -650,7 +674,7 @@ TEST(UicEmit, ButtonsRenderTheirRestingState) {
       "        widgetstate over {\n"
       "            image { texture: /art/over.img; width: 2h; height: 2h; }\n"
       "        }\n"
-      "        panel { width: 3h; height: 2h; color: 1 1 1; }\n"
+      "        panel { width: 3h; height: 2h; color: rgb(1, 1, 1); }\n"
       "    }\n"
       "}\n",
       &diags);
@@ -670,7 +694,7 @@ TEST(UicEmit, EmptyAlignFoldsToLeft) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(
       "template t { in a: ident;\n"
-      "    panel { width: 2h; height: 2h; align: a; color: 1 1 1; } }\n"
+      "    panel { width: 2h; height: 2h; align: a; color: rgb(1, 1, 1); } }\n"
       "panel { width: 40h; height: 4h; t { } }\n",
       &diags);
   EXPECT_FALSE(uic::hasErrors(diags));

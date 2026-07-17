@@ -27,7 +27,7 @@ enum Kind {
 }
 
 style dim_text {
-    color: 0 0 0 .85; textalign: center;
+    color: rgba(0, 0, 0, .85); textalign: center;
 }
 
 fn half(v: num) -> num = v / 2;
@@ -48,7 +48,7 @@ template chip {
             }
         }
         widgetstate hover {
-            color: 1 1 1 1;
+            color: rgb(1, 1, 1);
         }
     }
 }

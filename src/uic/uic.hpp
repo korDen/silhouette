@@ -55,9 +55,10 @@ struct EmitOptions {
   std::string schemaInclude = "generated/UiSnapshot.h";
   std::string assetRoot; // empty = skip validation
   bool rectLog = false;  // emit the rect-gate hook (RectLog parameter)
-  // style declarations resolve from the module itself plus these
-  // (parsed style modules, caller-owned)
+  // styles, templates, and asset consts resolve from the module itself
+  // plus these (parsed modules, caller-owned): --styles/--with
   std::vector<const Module *> styleModules;
+  std::vector<const Module *> withModules;
 };
 std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
                             std::vector<Diag> &diags);

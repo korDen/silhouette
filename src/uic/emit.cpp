@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <sstream>
@@ -164,20 +165,15 @@ bool parseColor(const std::string &s, float out[4]) {
   return true;
 }
 
-// The merged attribute view of one widget: node attrs win over styles.
-struct EffBag {
-  std::map<std::string, std::string> attrs;
-  const std::string *get(std::string_view key) const {
-    auto it = attrs.find(std::string(key));
-    return it == attrs.end() ? nullptr : &it->second;
-  }
-  bool flag(std::string_view key, bool def) const {
-    const std::string *v = get(key);
-    if (v == nullptr) {
-      return def;
-    }
-    return *v != "0";
-  }
+// One solved widget INSTANCE — template bodies are shared AST nodes,
+// so identity lives here, not on Node*: each instantiation yields its
+// own SolvedW with its own variable index and substituted bag.
+struct SolvedW {
+  int idx = -1;
+  const Node *node = nullptr;
+  std::map<std::string, std::string> attrs; // effective, substituted
+  std::vector<SolvedW *> kids;
+  bool reverse = false;
 };
 
 struct Emit {
@@ -193,7 +189,10 @@ struct Emit {
   std::vector<std::string> texOrder;
   std::map<std::string, std::string> assetConsts;
   std::map<std::string, const StyleDecl *> styles;
-  std::map<const Node *, int> nodeIdx;
+  std::map<std::string, const TemplateDecl *> templates;
+  std::deque<SolvedW> arena;
+  std::vector<std::map<std::string, std::string>> envStack;
+  int instanceDepth = 0;
   int nextVar = 0;
   int solveIndent = 1, drawIndent = 1;
 
@@ -322,16 +321,29 @@ struct Emit {
     return raw;
   }
 
-  // ---- the effective bag (style merge, widget wins) ------------------------
+  // ---- the effective bag (style merge, widget wins; param subst) ---------
 
-  EffBag bagOf(const Node &n) {
-    EffBag bag;
-    for (const Attr &a : n.attrs) {
-      bag.attrs.emplace(a.name, a.value);
+  // a value that exactly names a template parameter substitutes to the
+  // instantiation's argument (typed params fold — no splicing)
+  std::string substitute(const std::string &v) const {
+    for (auto it = envStack.rbegin(); it != envStack.rend(); ++it) {
+      auto hit = it->find(v);
+      if (hit != it->end()) {
+        return hit->second;
+      }
     }
-    if (const std::string *list = bag.get("style")) {
+    return v;
+  }
+
+  std::map<std::string, std::string> bagOf(const Node &n) {
+    std::map<std::string, std::string> bag;
+    for (const Attr &a : n.attrs) {
+      bag.emplace(a.name, a.value);
+    }
+    auto styleIt = bag.find("style");
+    if (styleIt != bag.end()) {
       // left-to-right, widget wins (first insertion wins the bag)
-      std::string s = *list;
+      const std::string s = styleIt->second;
       size_t i = 0;
       while (i <= s.size()) {
         const size_t comma = std::min(s.find(',', i), s.size());
@@ -351,7 +363,7 @@ struct Emit {
           }
         } else {
           for (const Attr &a : it->second->attrs) {
-            bag.attrs.emplace(a.name, a.value);
+            bag.emplace(a.name, a.value);
           }
         }
         if (comma == s.size()) {
@@ -360,7 +372,23 @@ struct Emit {
         i = comma + 1;
       }
     }
+    if (!envStack.empty()) {
+      for (auto &kv : bag) {
+        kv.second = substitute(kv.second);
+      }
+    }
     return bag;
+  }
+
+  static const std::string *get(
+      const std::map<std::string, std::string> &bag, std::string_view key) {
+    auto it = bag.find(std::string(key));
+    return it == bag.end() ? nullptr : &it->second;
+  }
+  static bool flag(const std::map<std::string, std::string> &bag,
+                   std::string_view key, bool def) {
+    const std::string *v = get(bag, key);
+    return v == nullptr ? def : (*v != "0");
   }
 
   const Bind *bind(const Node &n, std::string_view key) {
@@ -374,40 +402,102 @@ struct Emit {
 
   // ---- the solve schedule ---------------------------------------------------
 
-  // returns the widget's variable index, or -1 when skipped
-  int solveNode(const Node &n, const std::string &pw, const std::string &ph,
-                const std::string &cursor,
-                const char mainAxis /* 'x','y', 0 = not floated */) {
+  // Solve one AST node into zero or more widget INSTANCES appended to
+  // `out`: a builtin widget yields one SolvedW; a template invocation
+  // is transparent — its body's roots join the parent's child list
+  // (each participating in the chain/union individually).
+  void solveInto(std::vector<SolvedW *> &out, const Node &n,
+                 const std::string &pw, const std::string &ph,
+                 const std::string &cursor, const char mainAxis) {
     if (n.kind != Node::kWidget) {
       skip(n.line, n.kind == Node::kIf ? "if arms" : "widgetstate");
-      return -1;
+      return;
     }
     if (n.tag != "panel" && n.tag != "image" && n.tag != "frame") {
-      skip(n.line, "widget '" + n.tag + "'");
-      return -1;
+      auto tpl = templates.find(n.tag);
+      if (tpl == templates.end()) {
+        skip(n.line, "widget '" + n.tag + "'");
+        return;
+      }
+      if (instanceDepth > 32) {
+        err(n.line, "template instantiation deeper than 32 ('" + n.tag +
+                        "') — cycle?");
+        return;
+      }
+      // ---- instantiate: params fold at compile time -------------------
+      const TemplateDecl &t = *tpl->second;
+      std::map<std::string, std::string> env;
+      for (const InParam &p : t.ins) {
+        if (p.hasDefault) {
+          env[p.name] = p.defaultValue;
+        }
+      }
+      for (const Attr &a : n.attrs) {
+        bool known = false;
+        for (const InParam &p : t.ins) {
+          if (p.name == a.name) {
+            known = true;
+            break;
+          }
+        }
+        if (!known) {
+          diags.push_back({m.name, a.line, 0,
+                           "'" + t.name + "' has no param '" + a.name +
+                               "' (arg ignored)",
+                           Diag::Severity::kWarning});
+          continue;
+        }
+        // arg values may reference the OUTER instantiation's params
+        env[a.name] = substitute(a.value);
+      }
+      for (const InParam &p : t.ins) {
+        if (env.find(p.name) == env.end()) {
+          diags.push_back({m.name, n.line, 0,
+                           "'" + t.name + "' param '" + p.name +
+                               "' has no argument and no default",
+                           Diag::Severity::kWarning});
+          env[p.name] = "";
+        }
+      }
+      solveLine("// >>> " + t.name + " :" + std::to_string(n.line));
+      envStack.push_back(std::move(env));
+      ++instanceDepth;
+      for (const NodePtr &b : t.body) {
+        solveInto(out, *b, pw, ph, cursor, mainAxis);
+      }
+      --instanceDepth;
+      envStack.pop_back();
+      solveLine("// <<< " + t.name);
+      return;
     }
-    const EffBag bag = bagOf(n);
-    const int i = nextVar++;
-    nodeIdx[&n] = i;
-    const std::string sfx = std::to_string(i);
+
+    SolvedW &sw = arena.emplace_back();
+    sw.node = &n;
+    sw.attrs = bagOf(n);
+    sw.idx = nextVar++;
+    sw.reverse = flag(sw.attrs, "reverse", false);
+    out.push_back(&sw);
+
+    const std::string sfx = std::to_string(sw.idx);
     const std::string vx = "x" + sfx, vy = "y" + sfx, vw = "w" + sfx,
                       vh = "h" + sfx;
     decl << "  float " << vx << " = 0, " << vy << " = 0, " << vw
          << " = 0, " << vh << " = 0;\n";
 
-    const bool grows = bag.flag("grow", false);
+    const bool grows = flag(sw.attrs, "grow", false);
     solveLine("// " + n.tag +
-              (bag.get("name") != nullptr ? " '" + *bag.get("name") + "'"
-                                          : std::string()) +
+              (get(sw.attrs, "name") != nullptr
+                   ? " '" + *get(sw.attrs, "name") + "'"
+                   : std::string()) +
               " :" + std::to_string(n.line));
 
     // ---- size (annex: explicit floors the union on grow widgets;
     // missing size = 100% of parent, or the union alone when growing)
     auto sizeExpr = [&](const char *key, const char *sizeKey,
                         bool horizontal) -> std::string {
-      const std::string *v = bag.get(key);
+      const std::string *v = get(sw.attrs, key);
       if (v == nullptr) {
-        v = bag.get(sizeKey);
+        v = get(sw.attrs, sizeKey);
       }
       if (v != nullptr) {
         const Dim d = parseDim(*v);
@@ -436,18 +526,18 @@ struct Emit {
     solveLine(vh + " = " + hE + ";");
 
     // ---- children (before position: a grown size feeds the align)
-    solveChildren(n, bag, i, vw, vh, grows);
+    solveChildren(sw, vw, vh, grows);
 
     // ---- position
     std::string xOff = "0.0f", yOff = "0.0f";
-    if (const std::string *x = bag.get("x")) {
+    if (const std::string *x = get(sw.attrs, "x")) {
       xOff = dimExpr(parseDim(*x), true, pw, ph, false);
     }
-    if (const std::string *y = bag.get("y")) {
+    if (const std::string *y = get(sw.attrs, "y")) {
       yOff = dimExpr(parseDim(*y), false, pw, ph, false);
     }
-    const std::string *al = bag.get("align");
-    const std::string *val = bag.get("valign");
+    const std::string *al = get(sw.attrs, "align");
+    const std::string *val = get(sw.attrs, "valign");
     auto alignBase = [&](const std::string *a, const std::string &pdim,
                          const std::string &cdim) -> std::string {
       if (a == nullptr || *a == "left" || *a == "top") {
@@ -472,26 +562,25 @@ struct Emit {
       solveLine(vy + " = " + alignBase(val, ph, vh) + " + R(" + yOff +
                 ");");
     }
-    return i;
   }
 
-  void solveChildren(const Node &n, const EffBag &bag, int i,
-                     const std::string &vw, const std::string &vh,
-                     bool grows) {
+  void solveChildren(SolvedW &sw, const std::string &vw,
+                     const std::string &vh, bool grows) {
+    const Node &n = *sw.node;
     if (n.children.empty()) {
       return;
     }
-    const std::string *fl = bag.get("float");
+    const std::string *fl = get(sw.attrs, "float");
     const char mainAxis =
         fl == nullptr ? 0 : (*fl == "right" ? 'x' : (*fl == "bottom" ? 'y' : 0));
-    const std::string sfx = std::to_string(i);
+    const std::string sfx = std::to_string(sw.idx);
     std::string spacing = "0.0f";
-    if (const std::string *pad = bag.get("padding")) {
+    if (const std::string *pad = get(sw.attrs, "padding")) {
       spacing = "R(" + dimExpr(parseDim(*pad), mainAxis == 'x', vw, vh,
                                false) +
                 ")";
     }
-    const bool growinvis = bag.flag("growinvis", true);
+    const bool growinvis = flag(sw.attrs, "growinvis", true);
 
     if (grows) {
       solveLine("for (int pass" + sfx + " = 0; pass" + sfx + " < 2; ++pass" +
@@ -505,28 +594,28 @@ struct Emit {
       solveLine(cursor + " = 0;");
     }
     for (const NodePtr &c : n.children) {
-      const int ci = solveNode(*c, vw, vh, cursor, mainAxis);
-      if (ci < 0) {
-        continue;
-      }
-      const std::string cs = std::to_string(ci);
-      // occupancy flags come from the CHILD's effective bag
-      const EffBag cbag = bagOf(*c);
-      const std::string *cvis = cbag.get("visible");
-      const bool hidden = cvis != nullptr && *cvis == "0";
-      const bool counts = !hidden || growinvis;
-      const bool advances = !hidden || cbag.flag("stickytoinvis", true);
-      if (grows && counts) {
-        solveLine("if (pass" + sfx + " == 0) { " + vw + " = std::max(" +
-                  vw + ", x" + cs + " + w" + cs + "); " + vh +
-                  " = std::max(" + vh + ", y" + cs + " + h" + cs +
-                  "); }");
-      }
-      if (mainAxis != 0 && advances) {
-        const std::string cend = mainAxis == 'x'
-                                     ? "x" + cs + " + w" + cs
-                                     : "y" + cs + " + h" + cs;
-        solveLine(cursor + " = " + cend + " + " + spacing + ";");
+      const size_t before = sw.kids.size();
+      solveInto(sw.kids, *c, vw, vh, cursor, mainAxis);
+      for (size_t k = before; k < sw.kids.size(); ++k) {
+        const SolvedW &cw = *sw.kids[k];
+        const std::string cs = std::to_string(cw.idx);
+        const std::string *cvis = get(cw.attrs, "visible");
+        const bool hidden = cvis != nullptr && *cvis == "0";
+        const bool counts = !hidden || growinvis;
+        const bool advances = !hidden || flag(cw.attrs, "stickytoinvis",
+                                              true);
+        if (grows && counts) {
+          solveLine("if (pass" + sfx + " == 0) { " + vw + " = std::max(" +
+                    vw + ", x" + cs + " + w" + cs + "); " + vh +
+                    " = std::max(" + vh + ", y" + cs + " + h" + cs +
+                    "); }");
+        }
+        if (mainAxis != 0 && advances) {
+          const std::string cend = mainAxis == 'x'
+                                       ? "x" + cs + " + w" + cs
+                                       : "y" + cs + " + h" + cs;
+          solveLine(cursor + " = " + cend + " + " + spacing + ";");
+        }
       }
     }
     if (grows) {
@@ -537,24 +626,21 @@ struct Emit {
 
   // ---- the draw pass (render order; absolute coordinates) -----------------
 
-  void drawNode(const Node &n, const std::string &pax,
-                const std::string &pay, int myIdx) {
-    if (myIdx < 0 || n.kind != Node::kWidget) {
-      return;
-    }
-    const EffBag bag = bagOf(n);
-    const std::string sfx = std::to_string(myIdx);
+  void drawNode(const SolvedW &sw, const std::string &pax,
+                const std::string &pay) {
+    const Node &n = *sw.node;
+    const std::string sfx = std::to_string(sw.idx);
     const std::string ax = "ax" + sfx, ay = "ay" + sfx;
     drawLine("const float " + ax + " = " + pax + " + x" + sfx + ";");
     drawLine("const float " + ay + " = " + pay + " + y" + sfx + ";");
     if (opt.rectLog) {
-      const std::string *nm = bag.get("name");
+      const std::string *nm = get(sw.attrs, "name");
       drawLine("if (log) log->add(\"" + n.tag + "\", \"" +
                (nm != nullptr ? *nm : std::string()) + "\", " + ax + ", " +
                ay + ", w" + sfx + ", h" + sfx + ");");
     }
 
-    const std::string *vis = bag.get("visible");
+    const std::string *vis = get(sw.attrs, "visible");
     const bool hidden = vis != nullptr && *vis == "0";
     if (hidden) {
       // visible: 0 gates the SUBTREE's drawing (solved for occupancy)
@@ -567,21 +653,18 @@ struct Emit {
       drawLine("if (" + expr(*bv->expr) + ") {");
       ++drawIndent;
     }
-    emitDraw(n, bag, ax, ay, "w" + sfx, "h" + sfx);
+    emitDraw(n, sw.attrs, ax, ay, "w" + sfx, "h" + sfx);
 
-    // render order: children in document order, reversed when reverse: 1
-    // (layout already ran in document order — the solve pass)
-    std::vector<const Node *> order;
-    for (const NodePtr &c : n.children) {
-      order.push_back(c.get());
-    }
-    if (bag.flag("reverse", false)) {
-      std::vector<const Node *> r(order.rbegin(), order.rend());
-      order = std::move(r);
-    }
-    for (const Node *c : order) {
-      auto it = nodeIdx.find(c);
-      drawNode(*c, ax, ay, it == nodeIdx.end() ? -1 : it->second);
+    // render order: solved order, reversed when reverse: 1 (layout
+    // already ran in document order — the solve pass)
+    if (sw.reverse) {
+      for (auto it = sw.kids.rbegin(); it != sw.kids.rend(); ++it) {
+        drawNode(**it, ax, ay);
+      }
+    } else {
+      for (const SolvedW *c : sw.kids) {
+        drawNode(*c, ax, ay);
+      }
     }
     if (bv != nullptr) { // a bound visible gates the subtree too
       --drawIndent;
@@ -589,9 +672,10 @@ struct Emit {
     }
   }
 
-  std::string colorLiteral(const EffBag &bag, int line, float def) {
+  std::string colorLiteral(const std::map<std::string, std::string> &bag,
+                           int line, float def) {
     float c[4] = {def, def, def, 1};
-    if (const std::string *col = bag.get("color")) {
+    if (const std::string *col = get(bag, "color")) {
       if (!parseColor(*col, c)) {
         diags.push_back({m.name, line, 0,
                          "unparsable color '" + *col + "'",
@@ -602,18 +686,20 @@ struct Emit {
            ftos(c[2]) + ", " + ftos(c[3]) + "}";
   }
 
-  void emitDraw(const Node &n, const EffBag &bag, const std::string &ax,
+  void emitDraw(const Node &n,
+                const std::map<std::string, std::string> &bag,
+                const std::string &ax,
                 const std::string &ay, const std::string &w,
                 const std::string &h) {
     const std::string dst =
         "{" + ax + ", " + ay + ", " + w + ", " + h + "}";
     if (n.tag == "frame") {
-      const std::string *tex = bag.get("texture");
+      const std::string *tex = get(bag, "texture");
       if (tex == nullptr) {
         skip(n.line, "textureless frame");
         return;
       }
-      const std::string *bt = bag.get("borderthickness");
+      const std::string *bt = get(bag, "borderthickness");
       const std::string btE =
           "R(" +
           dimExpr(bt != nullptr ? parseDim(*bt) : parseDim("0"), false,
@@ -651,7 +737,7 @@ struct Emit {
       return;
     }
 
-    const std::string *tex = bag.get("texture");
+    const std::string *tex = get(bag, "texture");
     const Bind *texBind = bind(n, "texture");
     if (n.tag == "image" && tex == nullptr && texBind == nullptr) {
       skip(n.line, "image without a resolvable texture");
@@ -674,15 +760,15 @@ struct Emit {
       }
       std::string uv = "{0, 0, 1, 1}";
       std::string flags = "0";
-      if (const std::string *us = bag.get("uscale")) {
+      if (const std::string *us = get(bag, "uscale")) {
         const float span = 1.f / std::strtof(us->c_str(), nullptr);
         uv = "{0, 0, " + ftos(span) + ", 1}";
       }
-      if (const std::string *hf = bag.get("hflip");
+      if (const std::string *hf = get(bag, "hflip");
           hf != nullptr && *hf == "1") {
         uv = "{1, 0, -1, 1}";
       }
-      if (const std::string *ut = bag.get("utile");
+      if (const std::string *ut = get(bag, "utile");
           ut != nullptr && *ut == "1") {
         flags = "ui::kTileU";
       }
@@ -691,35 +777,42 @@ struct Emit {
                ", 0, ui::kNoClip);");
       return;
     }
-    if (bag.get("color") != nullptr ||
+    if (get(bag, "color") != nullptr ||
         (tex != nullptr && *tex == "$white")) {
       drawLine("sink.quad(" + dst + ", " + colorLiteral(bag, n.line, 1) +
                ", 0, ui::kNoClip);");
     }
   }
 
-  void run() {
-    for (const StyleDecl &s : m.styles) {
+  void registerModule(const Module &mod) {
+    for (const StyleDecl &s : mod.styles) {
       styles.emplace(s.name, &s);
     }
-    for (const Module *sm : opt.styleModules) {
-      for (const StyleDecl &s : sm->styles) {
-        styles.emplace(s.name, &s);
-      }
+    for (const TemplateDecl &t : mod.templates) {
+      templates.emplace(t.name, &t);
     }
-    for (const ConstDecl &c : m.consts) {
+    for (const ConstDecl &c : mod.consts) {
       if (c.type == "asset" ||
           (!c.rawValue.empty() && c.rawValue[0] == '/')) {
-        assetConsts[c.name] = c.rawValue;
+        assetConsts.emplace(c.name, c.rawValue);
       }
     }
-    for (const NodePtr &n : m.roots) { // screen = the parent
-      solveNode(*n, "W", "H", "", 0);
+  }
+
+  void run() {
+    registerModule(m);
+    for (const Module *sm : opt.styleModules) {
+      registerModule(*sm);
     }
-    for (const NodePtr &n : m.roots) {
-      auto it = nodeIdx.find(n.get());
-      drawNode(*n, "0.0f", "0.0f",
-               it == nodeIdx.end() ? -1 : it->second);
+    for (const Module *wm : opt.withModules) {
+      registerModule(*wm);
+    }
+    std::vector<SolvedW *> roots;
+    for (const NodePtr &n : m.roots) { // screen = the parent
+      solveInto(roots, *n, "W", "H", "", 0);
+    }
+    for (const SolvedW *r : roots) {
+      drawNode(*r, "0.0f", "0.0f");
     }
   }
 };

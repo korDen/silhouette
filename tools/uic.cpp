@@ -21,6 +21,7 @@ int main(int argc, char **argv) {
   std::string ns = "hud";
   std::vector<std::string> files;
   std::vector<std::string> styleFiles;
+  std::vector<std::string> withFiles;
   for (int i = 1; i < argc; ++i) {
     auto next = [&]() -> const char * {
       if (i + 1 >= argc) {
@@ -39,6 +40,8 @@ int main(int argc, char **argv) {
       assetRoot = next();
     } else if (std::strcmp(argv[i], "--styles") == 0) {
       styleFiles.emplace_back(next());
+    } else if (std::strcmp(argv[i], "--with") == 0) {
+      withFiles.emplace_back(next());
     } else if (std::strcmp(argv[i], "--rect-log") == 0) {
       rectLog = true;
     } else if (std::strcmp(argv[i], "--schema-include") == 0) {
@@ -116,37 +119,46 @@ int main(int argc, char **argv) {
       opt.schemaInclude = schemaInclude;
       opt.assetRoot = assetRoot;
       opt.rectLog = rectLog;
-      // style modules: parsed once, owned here for the emit's duration
-      std::vector<uic::Module> styleModules;
-      styleModules.reserve(styleFiles.size());
-      bool stylesOk = true;
-      for (const std::string &sf : styleFiles) {
+      // side modules (--styles/--with): parsed once, owned here for
+      // the emit's duration
+      std::vector<uic::Module> sideModules;
+      sideModules.reserve(styleFiles.size() + withFiles.size());
+      bool sidesOk = true;
+      auto loadSide = [&](const std::string &sf) -> const uic::Module * {
         std::ifstream sin(sf, std::ios::binary);
         if (!sin) {
-          std::fprintf(stderr, "%s: cannot read style module\n",
-                       sf.c_str());
-          stylesOk = false;
-          break;
+          std::fprintf(stderr, "%s: cannot read module\n", sf.c_str());
+          return nullptr;
         }
         std::ostringstream sss;
         sss << sin.rdbuf();
         std::vector<uic::Diag> sd;
-        styleModules.push_back(uic::parseModule(sss.str(), sf, sd));
+        sideModules.push_back(uic::parseModule(sss.str(), sf, sd));
         for (const uic::Diag &d : sd) {
           std::fprintf(stderr, "%s:%d:%d: %s\n", d.file.c_str(), d.line,
                        d.col, d.msg.c_str());
         }
-        if (uic::hasErrors(sd)) {
-          stylesOk = false;
+        return uic::hasErrors(sd) ? nullptr : &sideModules.back();
+      };
+      for (const std::string &sf : styleFiles) {
+        const uic::Module *sm = loadSide(sf);
+        if (sm == nullptr) {
+          sidesOk = false;
           break;
         }
+        opt.styleModules.push_back(sm);
       }
-      if (!stylesOk) {
+      for (const std::string &wf : withFiles) {
+        const uic::Module *wm = sidesOk ? loadSide(wf) : nullptr;
+        if (wm == nullptr) {
+          sidesOk = false;
+          break;
+        }
+        opt.withModules.push_back(wm);
+      }
+      if (!sidesOk) {
         ++failures;
         continue;
-      }
-      for (const uic::Module &sm : styleModules) {
-        opt.styleModules.push_back(&sm);
       }
       std::vector<uic::Diag> emitDiags;
       const std::string header = uic::emitPanelHeader(m, opt, emitDiags);

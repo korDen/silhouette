@@ -176,6 +176,50 @@ TEST(UicEmit, StylesMergeWidgetWins) {
   EXPECT_NE(h.find("for (int pass0"), std::string::npos);
 }
 
+TEST(UicEmit, TemplatesInstantiateWithFoldedParams) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template cell {\n"
+      "    in size: dim = 2h;\n"
+      "    in art: asset;\n"
+      "    image { texture: art; width: size; height: size; }\n"
+      "}\n"
+      "template pair {\n"
+      "    in art: asset;\n"
+      "    panel { grow: 1; float: right;\n"
+      "        cell { art: art; }\n"
+      "        cell { art: art; size: 3h; }\n"
+      "    }\n"
+      "}\n"
+      "panel { pair { art: /art/a.img; } pair { art: /art/b.img; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // four cell INSTANCES (nested templates, args referencing outer
+  // params), each with its own rect variables and folded values
+  size_t n = 0, pos = 0;
+  while ((pos = h.find("/art/a.img */", pos)) != std::string::npos) {
+    ++n;
+    ++pos;
+  }
+  EXPECT_EQ(n, 2u); // two cells of pair #1 draw art a
+  EXPECT_NE(h.find("/art/b.img"), std::string::npos);
+  EXPECT_NE(h.find("R(0.0299"), std::string::npos); // the 3h override
+  EXPECT_NE(h.find(">>> pair"), std::string::npos); // provenance markers
+}
+
+TEST(UicEmit, InstantiationDiagnostics) {
+  std::vector<uic::Diag> diags;
+  emit("template t { in a: num; panel { width: a; } }\n"
+       "panel { t { b: 1; } }\n",
+       &diags);
+  ASSERT_GE(diags.size(), 2u);
+  EXPECT_NE(diags[0].msg.find("no param 'b'"), std::string::npos);
+  EXPECT_NE(diags[1].msg.find("no argument and no default"),
+            std::string::npos);
+  // (a third warning follows: the empty substituted dim — also loud)
+  EXPECT_FALSE(uic::hasErrors(diags)); // degradation, not failure
+}
+
 TEST(UicEmit, HiddenChildOccupancyLaws) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

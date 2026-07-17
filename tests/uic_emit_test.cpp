@@ -114,14 +114,85 @@ TEST(UicEmit, OutsideTheSubsetDegradesLoudly) {
   EXPECT_NE(h.find("/art/a.img"), std::string::npos); // the rest emitted
 }
 
-TEST(UicEmit, VisibleZeroFoldsAway) {
+TEST(UicEmit, VisibleZeroGatesDrawsNotLayout) {
+  // the visible=0 adjudication: hidden subtrees SOLVE (occupancy per
+  // growinvis/stickytoinvis) but draw nothing
   std::vector<uic::Diag> diags;
   const std::string h = emit(
       "panel { panel { visible: 0; image { texture: /art/x.img; } } }\n",
       &diags);
   ASSERT_TRUE(diags.empty());
-  EXPECT_EQ(h.find("/art/x.img"), std::string::npos);
-  EXPECT_NE(h.find("visible: 0 -- folded away"), std::string::npos);
+  EXPECT_EQ(h.find("/art/x.img"), std::string::npos); // no draw call
+  EXPECT_NE(h.find("hidden subtree (visible: 0)"), std::string::npos);
+  EXPECT_NE(h.find("w1 = "), std::string::npos); // still solved
+}
+
+TEST(UicEmit, FloatChainThreadsACursor) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h; float: right; padding: .5h;\n"
+      "    image { texture: /art/a.img; width: 2h; }\n"
+      "    image { texture: /art/b.img; width: 3h; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("cur0 = 0;"), std::string::npos);
+  EXPECT_NE(h.find("x1 = cur0 + R(0.0f);"), std::string::npos);
+  EXPECT_NE(h.find("cur0 = x1 + w1 + R("), std::string::npos);
+  EXPECT_NE(h.find("x2 = cur0 + R(0.0f);"), std::string::npos);
+}
+
+TEST(UicEmit, GrowUnionsInAPassLoop) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { grow: 1; height: 4h;\n"
+      "    image { texture: /art/a.img; width: 2h; height: 100%; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // the floor law: explicit height floors the union; missing width = 0
+  EXPECT_NE(h.find("w0 = 0.0f;"), std::string::npos);
+  EXPECT_NE(h.find("h0 = R(0.0399"), std::string::npos); // 4h floor
+  // pass loop with unions gated to pass 0
+  EXPECT_NE(h.find("for (int pass0 = 0; pass0 < 2; ++pass0)"),
+            std::string::npos);
+  EXPECT_NE(h.find("if (pass0 == 0) { w0 = std::max(w0, x1 + w1); h0 = "
+                   "std::max(h0, y1 + h1); }"),
+            std::string::npos);
+}
+
+TEST(UicEmit, StylesMergeWidgetWins) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "style grow_all { grow: 1; height: 9h; }\n"
+      "panel { style: grow_all; height: 4h;\n"
+      "    image { texture: /art/a.img; width: 2h; height: 2h; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // widget's height wins over the style's; the style's grow applies
+  EXPECT_NE(h.find("h0 = R(0.0399"), std::string::npos); // 4h, not 9h
+  EXPECT_EQ(h.find("R(0.0899"), std::string::npos);
+  EXPECT_NE(h.find("for (int pass0"), std::string::npos);
+}
+
+TEST(UicEmit, HiddenChildOccupancyLaws) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { grow: 1; growinvis: 0; float: right;\n"
+      "    image { texture: /art/a.img; width: 2h; height: 2h;\n"
+      "            visible: 0; }\n"
+      "    image { texture: /art/b.img; width: 3h; height: 2h;\n"
+      "            visible: 0; stickytoinvis: 0; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // growinvis=0: neither hidden child unions
+  EXPECT_EQ(h.find("std::max(w0"), std::string::npos);
+  // stickytoinvis default 1: the first child still advances the chain;
+  // the second (stickytoinvis: 0) does not
+  EXPECT_NE(h.find("cur0 = x1 + w1"), std::string::npos);
+  EXPECT_EQ(h.find("cur0 = x2 + w2"), std::string::npos);
 }
 
 } // namespace

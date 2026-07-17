@@ -1,29 +1,24 @@
-// uic emit pass — the FIRST vertical slice of panel codegen: a module
-// whose widgets use the ABSOLUTE subset compiles to a self-contained
-// header:  template <class Sink> void <module>(const NS::UiSnapshot&,
-// float screenW, float screenH, Sink&).
+// uic emit pass — panel codegen with THE LAYOUT SCHEDULER (M-A): the
+// solve laws live in the spec's layout annex (spec-first — this file
+// implements the annex). A module compiles
+// to a self-contained header:
 //
-// Subset (grows toward the full dialect; anything outside it is a
-// loud diagnostic, never a silent skip):
-//   - widgets: panel (quad when colored, container otherwise), image,
-//     frame (nine-slice, borderthickness vs PARENT — the dialect law);
-//   - dims: plain px, %, @ (parent other axis), h, w (screen), leading
-//     +/- = parent + value (sizes only);
-//   - align/valign + x/y offsets; size:; visible: 0/1 literals fold;
-//   - texture: path literal, asset const, $white/$invis; utile+uscale
-//     (plain-float inversion law: span = 1/uscale); hflip;
-//   - color: #hex[аа], "r g b [a]" floats, a few names;
-//   - bind texture: (TextureId expression over the snapshot),
-//     bind visible: (bool expression),
-//     bind width/height: INTERIM LAW — the expression is a 0..1
-//     fraction of the parent (typed dim binds land with the
-//     instantiate pass); fracf(a, b) is the one builtin.
+//   template <class Sink>
+//   void <module>(const NS::UiSnapshot&, float screenW, float screenH,
+//                 Sink&, RectLog* = nullptr);
 //
-// Ids are the spec's content law (FNV-1a-32 over lowercased,
-// '\\'->'/' text; 0 remaps to 1), precomputed here into constexpr
-// literals; the emitted kTextures manifest carries {id, path} pairs
-// for host registration. With EmitOptions.assetRoot set, every path
-// (frame families expanded) must exist on disk.
+// Generated shape: one flat set of rect variables, a SOLVE block that
+// replays the schedule (document order; float-chain cursors; grow
+// unions run incrementally inside a two-pass loop — pass 0 unions,
+// pass 1 is the growPass re-solve), then a DRAW block in render order
+// (reverse honored) using absolute coordinates. Visibility gates draws
+// only; occupancy follows growinvis/stickytoinvis.
+//
+// Degradation is loud, never fatal: unsupported constructs warn and
+// leave SKIP comments; the module still renders (the functional bar).
+// RectLog is the rect gate's hook: when non-null the solve block
+// reports every widget's absolute rect with tag/name for diffing
+// against a reference solver's dump.
 #include "uic/uic.hpp"
 
 #include <cctype>
@@ -95,8 +90,6 @@ std::string ftos(float v) {
   char buf[48];
   std::snprintf(buf, sizeof buf, "%.9g", (double)v);
   std::string s = buf;
-  // "%g" of a whole value prints no decimal point; "2f" is not a C++
-  // literal — make it "2.0f"
   if (s.find('.') == std::string::npos &&
       s.find('e') == std::string::npos) {
     s += ".0";
@@ -123,7 +116,6 @@ bool parseColor(const std::string &s, float out[4]) {
     out[3] = s.size() == 9 ? hex(7) : 1.f;
     return true;
   }
-  // the standard web colour keywords (rounded), plus 'invisible'
   static const struct {
     const char *name;
     float r, g, b, a;
@@ -150,7 +142,6 @@ bool parseColor(const std::string &s, float out[4]) {
       return true;
     }
   }
-  // space-separated floats "r g b [a]"
   const char *p = s.c_str();
   char *end = nullptr;
   float v[4] = {0, 0, 0, 1};
@@ -173,64 +164,69 @@ bool parseColor(const std::string &s, float out[4]) {
   return true;
 }
 
+// The merged attribute view of one widget: node attrs win over styles.
+struct EffBag {
+  std::map<std::string, std::string> attrs;
+  const std::string *get(std::string_view key) const {
+    auto it = attrs.find(std::string(key));
+    return it == attrs.end() ? nullptr : &it->second;
+  }
+  bool flag(std::string_view key, bool def) const {
+    const std::string *v = get(key);
+    if (v == nullptr) {
+      return def;
+    }
+    return *v != "0";
+  }
+};
+
 struct Emit {
+  Emit(const Module &mod, const EmitOptions &options,
+       std::vector<Diag> &out)
+      : m(mod), opt(options), diags(out) {}
+
   const Module &m;
   const EmitOptions &opt;
   std::vector<Diag> &diags;
-  std::ostringstream body;
-  std::map<std::string, uint32_t> texIds; // path -> id (manifest order kept)
+  std::ostringstream decl, solve, draw;
+  std::map<std::string, uint32_t> texIds;
   std::vector<std::string> texOrder;
-  std::map<std::string, std::string> assetConsts; // const name -> path
+  std::map<std::string, std::string> assetConsts;
+  std::map<std::string, const StyleDecl *> styles;
+  std::map<const Node *, int> nodeIdx;
   int nextVar = 0;
-  int indent = 1;
+  int solveIndent = 1, drawIndent = 1;
 
   void err(int line, std::string msg) {
     diags.push_back({m.name, line, 0, std::move(msg),
                      Diag::Severity::kError});
   }
-
-  // graceful degradation: the generated tree must LOAD AND RENDER from
-  // the first commit (the functional bar) — an unsupported
-  // construct is a LOUD warning and a skip comment, never a hard stop
   void skip(int atLine, const std::string &what) {
-    diags.push_back({m.name, atLine, 0, "skipped (unsupported yet): " + what,
+    diags.push_back({m.name, atLine, 0,
+                     "skipped (unsupported yet): " + what,
                      Diag::Severity::kWarning});
-    line("// SKIP(unsupported): " + what + " :" + std::to_string(atLine));
+    drawLine("// SKIP(unsupported): " + what + " :" +
+             std::to_string(atLine));
+  }
+  void solveLine(const std::string &s) {
+    solve << std::string((size_t)solveIndent * 2, ' ') << s << '\n';
+  }
+  void drawLine(const std::string &s) {
+    draw << std::string((size_t)drawIndent * 2, ' ') << s << '\n';
   }
 
-  void line(const std::string &s) {
-    body << std::string((size_t)indent * 2, ' ') << s << '\n';
-  }
-
-  uint32_t texId(const std::string &path, int atLine, bool family) {
-    if (!opt.assetRoot.empty() && path[0] != '$') {
+  uint32_t texId(const std::string &path, int atLine) {
+    if (!opt.assetRoot.empty() && !path.empty() && path[0] != '$') {
       namespace fs = std::filesystem;
-      auto exists = [&](std::string p) {
-        fs::path full = fs::path(opt.assetRoot) /
-                        (p[0] == '/' ? p.substr(1) : p);
-        std::error_code ec;
-        if (fs::exists(full, ec)) {
-          return true;
-        }
-        if (full.extension() == ".tga") {
-          full.replace_extension(".dds");
-          return fs::exists(full, ec);
-        }
-        return false;
-      };
-      if (family) {
-        static const char *const kPieces[9] = {"_tl", "_t", "_tr",
-                                               "_l",  "_c", "_r",
-                                               "_bl", "_b", "_br"};
-        const size_t dot = path.rfind('.');
-        for (const char *suffix : kPieces) {
-          const std::string piece =
-              path.substr(0, dot) + suffix + path.substr(dot);
-          if (!exists(piece)) {
-            err(atLine, "missing asset: " + piece);
-          }
-        }
-      } else if (!exists(path)) {
+      fs::path full = fs::path(opt.assetRoot) /
+                      (path[0] == '/' ? path.substr(1) : path);
+      std::error_code ec;
+      bool ok = fs::exists(full, ec);
+      if (!ok && full.extension() == ".tga") {
+        full.replace_extension(".dds");
+        ok = fs::exists(full, ec);
+      }
+      if (!ok) {
         err(atLine, "missing asset: " + path);
       }
     }
@@ -243,8 +239,13 @@ struct Emit {
     texOrder.push_back(path);
     return id;
   }
+  std::string texIdExpr(const std::string &path, int atLine) {
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "0x%08Xu", texId(path, atLine));
+    return std::string(buf) + " /* " + path + " */";
+  }
 
-  // ---- expressions -> C++ ------------------------------------------------
+  // ---- expressions (binds) ----------------------------------------------
 
   std::string expr(const Expr &e) {
     switch (e.kind) {
@@ -252,32 +253,23 @@ struct Emit {
       if (e.text == "snapshot") {
         return "s";
       }
-      err(e.line, "unknown identifier '" + e.text +
-                      "' in bind (subset: snapshot fields, fracf)");
+      err(e.line, "unknown identifier '" + e.text + "' in bind");
       return "0";
     case Expr::kNumber:
-      return e.text;
     case Expr::kBool:
       return e.text;
+    case Expr::kPath:
+      return texIdExpr(e.text, e.line);
     case Expr::kString:
-      err(e.line, "string in bind expression (snapshots carry no strings)");
-      return "0";
-    case Expr::kPath: {
-      char buf[16];
-      std::snprintf(buf, sizeof buf, "0x%08Xu",
-                    texId(e.text, e.line, /*family=*/false));
-      return std::string(buf) + " /* " + e.text + " */";
-    }
     case Expr::kDim:
     case Expr::kColor:
-      err(e.line, "dim/color literals in binds land with the typed-dim "
-                  "pass");
+      err(e.line, "literal kind not yet allowed in binds");
       return "0";
     case Expr::kField:
       return expr(*e.args[0]) + "." + e.text;
     case Expr::kIndex:
       return expr(*e.args[0]) + "[" + expr(*e.args[1]) + "]";
-    case Expr::kCall: {
+    case Expr::kCall:
       if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "fracf") {
         if (e.args.size() != 3) {
           err(e.line, "fracf takes (num, den)");
@@ -288,7 +280,6 @@ struct Emit {
       }
       err(e.line, "call in bind (subset builtin: fracf)");
       return "0";
-    }
     case Expr::kUnary:
       return "(" + e.text + expr(*e.args[0]) + ")";
     case Expr::kBinary:
@@ -301,7 +292,7 @@ struct Emit {
     return "0";
   }
 
-  // dim -> C++ expression; pw/ph are the parent's size vars
+  // dim -> C++ expression against the parent's CURRENT size variables
   std::string dimExpr(const Dim &d, bool horizontal, const std::string &pw,
                       const std::string &ph, bool isSize) {
     std::string raw;
@@ -322,26 +313,56 @@ struct Emit {
       raw = ftos(d.value / 100.f) + " * W";
       break;
     case Dim::kBad:
-      raw = "0";
+      raw = "0.0f";
       break;
     }
     if (isSize && d.delta) {
-      // parent + value (the value already carries its sign)
       return (horizontal ? pw : ph) + " + (" + raw + ")";
     }
     return raw;
   }
 
-  // ---- widgets -----------------------------------------------------------
+  // ---- the effective bag (style merge, widget wins) ------------------------
 
-  const std::string *attr(const Node &n, std::string_view key) {
+  EffBag bagOf(const Node &n) {
+    EffBag bag;
     for (const Attr &a : n.attrs) {
-      if (a.name == key) {
-        return &a.value;
+      bag.attrs.emplace(a.name, a.value);
+    }
+    if (const std::string *list = bag.get("style")) {
+      // left-to-right, widget wins (first insertion wins the bag)
+      std::string s = *list;
+      size_t i = 0;
+      while (i <= s.size()) {
+        const size_t comma = std::min(s.find(',', i), s.size());
+        std::string name = s.substr(i, comma - i);
+        while (!name.empty() && name.front() == ' ') {
+          name.erase(name.begin());
+        }
+        while (!name.empty() && name.back() == ' ') {
+          name.pop_back();
+        }
+        auto it = styles.find(name);
+        if (it == styles.end()) {
+          if (!name.empty()) {
+            diags.push_back({m.name, n.line, 0,
+                             "unknown style '" + name + "'",
+                             Diag::Severity::kWarning});
+          }
+        } else {
+          for (const Attr &a : it->second->attrs) {
+            bag.attrs.emplace(a.name, a.value);
+          }
+        }
+        if (comma == s.size()) {
+          break;
+        }
+        i = comma + 1;
       }
     }
-    return nullptr;
+    return bag;
   }
+
   const Bind *bind(const Node &n, std::string_view key) {
     for (const Bind &b : n.binds) {
       if (b.target == key) {
@@ -351,168 +372,288 @@ struct Emit {
     return nullptr;
   }
 
-  void emitNode(const Node &n, const std::string &px, const std::string &py,
-                const std::string &pw, const std::string &ph) {
+  // ---- the solve schedule ---------------------------------------------------
+
+  // returns the widget's variable index, or -1 when skipped
+  int solveNode(const Node &n, const std::string &pw, const std::string &ph,
+                const std::string &cursor,
+                const char mainAxis /* 'x','y', 0 = not floated */) {
     if (n.kind != Node::kWidget) {
       skip(n.line, n.kind == Node::kIf ? "if arms" : "widgetstate");
-      return;
+      return -1;
     }
     if (n.tag != "panel" && n.tag != "image" && n.tag != "frame") {
       skip(n.line, "widget '" + n.tag + "'");
-      return;
+      return -1;
     }
-    if (const std::string *v = attr(n, "visible")) {
-      if (*v == "0") {
-        line("// " + n.tag + " :" + std::to_string(n.line) +
-             " visible: 0 -- folded away");
-        return;
+    const EffBag bag = bagOf(n);
+    const int i = nextVar++;
+    nodeIdx[&n] = i;
+    const std::string sfx = std::to_string(i);
+    const std::string vx = "x" + sfx, vy = "y" + sfx, vw = "w" + sfx,
+                      vh = "h" + sfx;
+    decl << "  float " << vx << " = 0, " << vy << " = 0, " << vw
+         << " = 0, " << vh << " = 0;\n";
+
+    const bool grows = bag.flag("grow", false);
+    solveLine("// " + n.tag +
+              (bag.get("name") != nullptr ? " '" + *bag.get("name") + "'"
+                                          : std::string()) +
+              " :" + std::to_string(n.line));
+
+    // ---- size (annex: explicit floors the union on grow widgets;
+    // missing size = 100% of parent, or the union alone when growing)
+    auto sizeExpr = [&](const char *key, const char *sizeKey,
+                        bool horizontal) -> std::string {
+      const std::string *v = bag.get(key);
+      if (v == nullptr) {
+        v = bag.get(sizeKey);
       }
-    }
-
-    const int id = nextVar++;
-    const std::string sfx = std::to_string(id);
-    const std::string cw = "w" + sfx, chh = "h" + sfx, cx = "x" + sfx,
-                      cy = "y" + sfx;
-
-    line("{ // " + n.tag + " :" + std::to_string(n.line));
-    ++indent;
-
-    // size first (alignment needs it)
-    std::string wExpr = pw, hExpr = ph; // default 100% of parent
-    if (const std::string *sz = attr(n, "size")) {
-      const Dim d = parseDim(*sz);
-      wExpr = "R(" + dimExpr(d, true, pw, ph, true) + ")";
-      hExpr = "R(" + dimExpr(d, false, pw, ph, true) + ")";
-    }
-    if (const std::string *w = attr(n, "width")) {
-      wExpr = "R(" + dimExpr(parseDim(*w), true, pw, ph, true) + ")";
-    }
-    if (const std::string *h = attr(n, "height")) {
-      hExpr = "R(" + dimExpr(parseDim(*h), false, pw, ph, true) + ")";
-    }
+      if (v != nullptr) {
+        const Dim d = parseDim(*v);
+        if (d.kind == Dim::kBad) {
+          diags.push_back({m.name, n.line, 0,
+                           std::string("unsupported dim '") + *v +
+                               "' for " + key,
+                           Diag::Severity::kWarning});
+        }
+        return "R(" + dimExpr(d, horizontal, pw, ph, true) + ")";
+      }
+      if (grows) {
+        return "0.0f"; // union alone (the floor law)
+      }
+      return horizontal ? pw : ph; // default 100% of the parent
+    };
+    std::string wE = sizeExpr("width", "size", true);
+    std::string hE = sizeExpr("height", "size", false);
     if (const Bind *b = bind(n, "width")) {
-      // INTERIM LAW: bound width = fraction of the parent
-      wExpr = "R(" + pw + " * " + expr(*b->expr) + ")";
+      wE = "R(" + pw + " * " + expr(*b->expr) + ")"; // interim fraction law
     }
     if (const Bind *b = bind(n, "height")) {
-      hExpr = "R(" + ph + " * " + expr(*b->expr) + ")";
+      hE = "R(" + ph + " * " + expr(*b->expr) + ")";
     }
-    line("const float " + cw + " = " + wExpr + ";");
-    line("const float " + chh + " = " + hExpr + ";");
+    solveLine(vw + " = " + wE + ";");
+    solveLine(vh + " = " + hE + ";");
 
-    // position: align/valign + offsets
-    std::string xOff = "0", yOff = "0";
-    if (const std::string *x = attr(n, "x")) {
+    // ---- children (before position: a grown size feeds the align)
+    solveChildren(n, bag, i, vw, vh, grows);
+
+    // ---- position
+    std::string xOff = "0.0f", yOff = "0.0f";
+    if (const std::string *x = bag.get("x")) {
       xOff = dimExpr(parseDim(*x), true, pw, ph, false);
     }
-    if (const std::string *y = attr(n, "y")) {
+    if (const std::string *y = bag.get("y")) {
       yOff = dimExpr(parseDim(*y), false, pw, ph, false);
     }
-    const std::string *al = attr(n, "align");
-    const std::string *val = attr(n, "valign");
-    std::string xBase = px, yBase = py;
-    if (al != nullptr && *al == "center") {
-      xBase = px + " + R((" + pw + " - " + cw + ") / 2)";
-    } else if (al != nullptr && *al == "right") {
-      xBase = px + " + " + pw + " - " + cw;
+    const std::string *al = bag.get("align");
+    const std::string *val = bag.get("valign");
+    auto alignBase = [&](const std::string *a, const std::string &pdim,
+                         const std::string &cdim) -> std::string {
+      if (a == nullptr || *a == "left" || *a == "top") {
+        return "0.0f";
+      }
+      if (*a == "center") {
+        return "R((" + pdim + " - " + cdim + ") / 2)";
+      }
+      return pdim + " - " + cdim; // right/bottom (unrounded base)
+    };
+    if (mainAxis == 'x') {
+      solveLine(vx + " = " + cursor + " + R(" + xOff + ");");
+      solveLine(vy + " = " + alignBase(val, ph, vh) + " + R(" + yOff +
+                ");");
+    } else if (mainAxis == 'y') {
+      solveLine(vy + " = " + cursor + " + R(" + yOff + ");");
+      solveLine(vx + " = " + alignBase(al, pw, vw) + " + R(" + xOff +
+                ");");
+    } else {
+      solveLine(vx + " = " + alignBase(al, pw, vw) + " + R(" + xOff +
+                ");");
+      solveLine(vy + " = " + alignBase(val, ph, vh) + " + R(" + yOff +
+                ");");
     }
-    if (val != nullptr && *val == "center") {
-      yBase = py + " + R((" + ph + " - " + chh + ") / 2)";
-    } else if (val != nullptr && *val == "bottom") {
-      yBase = py + " + " + ph + " - " + chh;
-    }
-    line("const float " + cx + " = " + xBase + " + R(" + xOff + ");");
-    line("const float " + cy + " = " + yBase + " + R(" + yOff + ");");
+    return i;
+  }
 
+  void solveChildren(const Node &n, const EffBag &bag, int i,
+                     const std::string &vw, const std::string &vh,
+                     bool grows) {
+    if (n.children.empty()) {
+      return;
+    }
+    const std::string *fl = bag.get("float");
+    const char mainAxis =
+        fl == nullptr ? 0 : (*fl == "right" ? 'x' : (*fl == "bottom" ? 'y' : 0));
+    const std::string sfx = std::to_string(i);
+    std::string spacing = "0.0f";
+    if (const std::string *pad = bag.get("padding")) {
+      spacing = "R(" + dimExpr(parseDim(*pad), mainAxis == 'x', vw, vh,
+                               false) +
+                ")";
+    }
+    const bool growinvis = bag.flag("growinvis", true);
+
+    if (grows) {
+      solveLine("for (int pass" + sfx + " = 0; pass" + sfx + " < 2; ++pass" +
+                sfx + ") { // grow: pass 0 unions, pass 1 = the growPass");
+      ++solveIndent;
+    }
+    std::string cursor;
+    if (mainAxis != 0) {
+      cursor = "cur" + sfx;
+      decl << "  float " << cursor << " = 0;\n";
+      solveLine(cursor + " = 0;");
+    }
+    for (const NodePtr &c : n.children) {
+      const int ci = solveNode(*c, vw, vh, cursor, mainAxis);
+      if (ci < 0) {
+        continue;
+      }
+      const std::string cs = std::to_string(ci);
+      // occupancy flags come from the CHILD's effective bag
+      const EffBag cbag = bagOf(*c);
+      const std::string *cvis = cbag.get("visible");
+      const bool hidden = cvis != nullptr && *cvis == "0";
+      const bool counts = !hidden || growinvis;
+      const bool advances = !hidden || cbag.flag("stickytoinvis", true);
+      if (grows && counts) {
+        solveLine("if (pass" + sfx + " == 0) { " + vw + " = std::max(" +
+                  vw + ", x" + cs + " + w" + cs + "); " + vh +
+                  " = std::max(" + vh + ", y" + cs + " + h" + cs +
+                  "); }");
+      }
+      if (mainAxis != 0 && advances) {
+        const std::string cend = mainAxis == 'x'
+                                     ? "x" + cs + " + w" + cs
+                                     : "y" + cs + " + h" + cs;
+        solveLine(cursor + " = " + cend + " + " + spacing + ";");
+      }
+    }
+    if (grows) {
+      --solveIndent;
+      solveLine("}");
+    }
+  }
+
+  // ---- the draw pass (render order; absolute coordinates) -----------------
+
+  void drawNode(const Node &n, const std::string &pax,
+                const std::string &pay, int myIdx) {
+    if (myIdx < 0 || n.kind != Node::kWidget) {
+      return;
+    }
+    const EffBag bag = bagOf(n);
+    const std::string sfx = std::to_string(myIdx);
+    const std::string ax = "ax" + sfx, ay = "ay" + sfx;
+    drawLine("const float " + ax + " = " + pax + " + x" + sfx + ";");
+    drawLine("const float " + ay + " = " + pay + " + y" + sfx + ";");
+    if (opt.rectLog) {
+      const std::string *nm = bag.get("name");
+      drawLine("if (log) log->add(\"" + n.tag + "\", \"" +
+               (nm != nullptr ? *nm : std::string()) + "\", " + ax + ", " +
+               ay + ", w" + sfx + ", h" + sfx + ");");
+    }
+
+    const std::string *vis = bag.get("visible");
+    const bool hidden = vis != nullptr && *vis == "0";
+    if (hidden) {
+      // visible: 0 gates the SUBTREE's drawing (solved for occupancy)
+      drawLine("// hidden subtree (visible: 0) :" +
+               std::to_string(n.line));
+      return;
+    }
     const Bind *bv = bind(n, "visible");
     if (bv != nullptr) {
-      line("if (" + expr(*bv->expr) + ") {");
-      ++indent;
+      drawLine("if (" + expr(*bv->expr) + ") {");
+      ++drawIndent;
     }
+    emitDraw(n, bag, ax, ay, "w" + sfx, "h" + sfx);
 
-    emitDraw(n, cx, cy, cw, chh, pw, ph);
-
+    // render order: children in document order, reversed when reverse: 1
+    // (layout already ran in document order — the solve pass)
+    std::vector<const Node *> order;
     for (const NodePtr &c : n.children) {
-      emitNode(*c, cx, cy, cw, chh);
+      order.push_back(c.get());
     }
-
-    if (bv != nullptr) {
-      --indent;
-      line("}");
+    if (bag.flag("reverse", false)) {
+      std::vector<const Node *> r(order.rbegin(), order.rend());
+      order = std::move(r);
     }
-    --indent;
-    line("}");
+    for (const Node *c : order) {
+      auto it = nodeIdx.find(c);
+      drawNode(*c, ax, ay, it == nodeIdx.end() ? -1 : it->second);
+    }
+    if (bv != nullptr) { // a bound visible gates the subtree too
+      --drawIndent;
+      drawLine("}");
+    }
   }
 
-  std::string colorLiteral(const Node &n, float def) {
+  std::string colorLiteral(const EffBag &bag, int line, float def) {
     float c[4] = {def, def, def, 1};
-    if (const std::string *col = attr(n, "color")) {
+    if (const std::string *col = bag.get("color")) {
       if (!parseColor(*col, c)) {
-        err(n.line, "unparsable color '" + *col + "'");
+        diags.push_back({m.name, line, 0,
+                         "unparsable color '" + *col + "'",
+                         Diag::Severity::kWarning});
       }
     }
-    return "ui::Color{" + ftos(c[0]) + ", " + ftos(c[1]) + ", " + ftos(c[2]) +
-           ", " + ftos(c[3]) + "}";
+    return "ui::Color{" + ftos(c[0]) + ", " + ftos(c[1]) + ", " +
+           ftos(c[2]) + ", " + ftos(c[3]) + "}";
   }
 
-  void emitDraw(const Node &n, const std::string &cx, const std::string &cy,
-                const std::string &cw, const std::string &chh,
-                const std::string &pw, const std::string &ph) {
+  void emitDraw(const Node &n, const EffBag &bag, const std::string &ax,
+                const std::string &ay, const std::string &w,
+                const std::string &h) {
     const std::string dst =
-        "{" + cx + ", " + cy + ", " + cw + ", " + chh + "}";
-
+        "{" + ax + ", " + ay + ", " + w + ", " + h + "}";
     if (n.tag == "frame") {
-      const std::string *tex = attr(n, "texture");
+      const std::string *tex = bag.get("texture");
       if (tex == nullptr) {
-        skip(n.line, "textureless frame (the white-pieces law lands with "
-                     "the full frame pass)");
+        skip(n.line, "textureless frame");
         return;
       }
-      const std::string *bt = attr(n, "borderthickness");
-      // the dialect law: borderthickness resolves against the PARENT
+      const std::string *bt = bag.get("borderthickness");
       const std::string btE =
           "R(" +
-          dimExpr(bt != nullptr ? parseDim(*bt) : parseDim("0"), false, pw,
-                  ph, false) +
+          dimExpr(bt != nullptr ? parseDim(*bt) : parseDim("0"), false,
+                  w, h, false) +
           ")";
-      const std::string col = colorLiteral(n, 1);
+      const std::string col = colorLiteral(bag, n.line, 1);
       const size_t dot = tex->rfind('.');
       static const struct {
         const char *suffix;
-        int gx, gy; // grid cell
+        int gx, gy;
       } kPieces[9] = {{"_tl", 0, 0}, {"_t", 1, 0},  {"_tr", 2, 0},
                       {"_l", 0, 1},  {"_c", 1, 1},  {"_r", 2, 1},
                       {"_bl", 0, 2}, {"_b", 1, 2},  {"_br", 2, 2}};
-      // the base name is a FAMILY name, not a file — only the nine
-      // pieces exist, validate + manifest below, one by one
-      line("const float bt = std::min(" + btE + ", std::min(" + cw +
-           ", " + chh + ") / 2);");
-      line("const float cwm = " + cw + " - 2 * bt, chm = " + chh +
-           " - 2 * bt;");
+      drawLine("{");
+      ++drawIndent;
+      drawLine("const float bt = std::min(" + btE + ", std::min(" + w +
+               ", " + h + ") / 2);");
+      drawLine("const float cwm = " + w + " - 2 * bt, chm = " + h +
+               " - 2 * bt;");
       for (const auto &p : kPieces) {
         const std::string piece =
             tex->substr(0, dot) + p.suffix + tex->substr(dot);
-        char idbuf[16];
-        std::snprintf(idbuf, sizeof idbuf, "0x%08Xu",
-                      texId(piece, n.line, /*family=*/false));
         const std::string x =
-            p.gx == 0 ? cx : (p.gx == 1 ? cx + " + bt" : cx + " + bt + cwm");
+            p.gx == 0 ? ax : (p.gx == 1 ? ax + " + bt" : ax + " + bt + cwm");
         const std::string y =
-            p.gy == 0 ? cy : (p.gy == 1 ? cy + " + bt" : cy + " + bt + chm");
-        const std::string w = p.gx == 1 ? "cwm" : "bt";
-        const std::string h = p.gy == 1 ? "chm" : "bt";
-        line("sink.image({" + x + ", " + y + ", " + w + ", " + h + "}, " +
-             idbuf + " /* " + piece + " */, {0, 0, 1, 1}, " + col +
-             ", 0, 0, ui::kNoClip);");
+            p.gy == 0 ? ay : (p.gy == 1 ? ay + " + bt" : ay + " + bt + chm");
+        drawLine("sink.image({" + x + ", " + y + ", " +
+                 (p.gx == 1 ? "cwm" : "bt") + ", " +
+                 (p.gy == 1 ? "chm" : "bt") + "}, " +
+                 texIdExpr(piece, n.line) + ", {0, 0, 1, 1}, " + col +
+                 ", 0, 0, ui::kNoClip);");
       }
+      --drawIndent;
+      drawLine("}");
       return;
     }
 
-    // image / textured panel / colored panel
-    const std::string *tex = attr(n, "texture");
+    const std::string *tex = bag.get("texture");
     const Bind *texBind = bind(n, "texture");
     if (n.tag == "image" && tex == nullptr && texBind == nullptr) {
-      // texture was deferred (a TODO'd interpolation) — degrade
       skip(n.line, "image without a resolvable texture");
       return;
     }
@@ -529,35 +670,57 @@ struct Emit {
         if (it != assetConsts.end()) {
           path = it->second;
         }
-        char idbuf[16];
-        std::snprintf(idbuf, sizeof idbuf, "0x%08Xu",
-                      texId(path, n.line, /*family=*/false));
-        idExpr = std::string(idbuf) + " /* " + path + " */";
+        idExpr = texIdExpr(path, n.line);
       }
-      // uv: hflip and the uscale inversion law (span = 1 / uscale)
       std::string uv = "{0, 0, 1, 1}";
       std::string flags = "0";
-      if (const std::string *us = attr(n, "uscale")) {
+      if (const std::string *us = bag.get("uscale")) {
         const float span = 1.f / std::strtof(us->c_str(), nullptr);
         uv = "{0, 0, " + ftos(span) + ", 1}";
       }
-      if (const std::string *hf = attr(n, "hflip"); hf != nullptr &&
-                                                    *hf == "1") {
+      if (const std::string *hf = bag.get("hflip");
+          hf != nullptr && *hf == "1") {
         uv = "{1, 0, -1, 1}";
       }
-      if (const std::string *ut = attr(n, "utile"); ut != nullptr &&
-                                                    *ut == "1") {
+      if (const std::string *ut = bag.get("utile");
+          ut != nullptr && *ut == "1") {
         flags = "ui::kTileU";
       }
-      line("sink.image(" + dst + ", " + idExpr + ", " + uv + ", " +
-           colorLiteral(n, 1) + ", " + flags + ", 0, ui::kNoClip);");
+      drawLine("sink.image(" + dst + ", " + idExpr + ", " + uv + ", " +
+               colorLiteral(bag, n.line, 1) + ", " + flags +
+               ", 0, ui::kNoClip);");
       return;
     }
-    if (attr(n, "color") != nullptr || (tex != nullptr && *tex == "$white")) {
-      line("sink.quad(" + dst + ", " + colorLiteral(n, 1) +
-           ", 0, ui::kNoClip);");
+    if (bag.get("color") != nullptr ||
+        (tex != nullptr && *tex == "$white")) {
+      drawLine("sink.quad(" + dst + ", " + colorLiteral(bag, n.line, 1) +
+               ", 0, ui::kNoClip);");
     }
-    // colorless textureless panel: container only (NO_DRAW)
+  }
+
+  void run() {
+    for (const StyleDecl &s : m.styles) {
+      styles.emplace(s.name, &s);
+    }
+    for (const Module *sm : opt.styleModules) {
+      for (const StyleDecl &s : sm->styles) {
+        styles.emplace(s.name, &s);
+      }
+    }
+    for (const ConstDecl &c : m.consts) {
+      if (c.type == "asset" ||
+          (!c.rawValue.empty() && c.rawValue[0] == '/')) {
+        assetConsts[c.name] = c.rawValue;
+      }
+    }
+    for (const NodePtr &n : m.roots) { // screen = the parent
+      solveNode(*n, "W", "H", "", 0);
+    }
+    for (const NodePtr &n : m.roots) {
+      auto it = nodeIdx.find(n.get());
+      drawNode(*n, "0.0f", "0.0f",
+               it == nodeIdx.end() ? -1 : it->second);
+    }
   }
 };
 
@@ -565,15 +728,8 @@ struct Emit {
 
 std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
                             std::vector<Diag> &diags) {
-  Emit e{m, opt, diags, {}, {}, {}, {}, 0, 1};
-  for (const ConstDecl &c : m.consts) {
-    if (c.type == "asset" || (!c.rawValue.empty() && c.rawValue[0] == '/')) {
-      e.assetConsts[c.name] = c.rawValue;
-    }
-  }
-  for (const NodePtr &n : m.roots) {
-    e.emitNode(*n, "0.0f", "0.0f", "W", "H");
-  }
+  Emit e(m, opt, diags);
+  e.run();
 
   std::ostringstream os;
   std::string fn = m.name;
@@ -585,9 +741,9 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
   os << "#pragma once\n"
      << "// GENERATED by uic --emit from " << m.name
      << ".ui -- DO NOT EDIT.\n"
-     << "// Absolute-subset panel codegen (see src/uic/emit.cpp for the\n"
-     << "// subset's laws). Depends on silhouette + the schema header "
-        "only.\n"
+     << "// Layout scheduler codegen (the layout annex in the language spec "
+        "is normative).\n"
+     << "// Depends on silhouette + the schema header only.\n"
      << "#include \"" << opt.schemaInclude << "\"\n"
      << "#include \"paint/sink.hpp\"\n\n"
      << "#include <algorithm>\n"
@@ -600,8 +756,18 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "inline float R(float f) { return std::floor(f + 0.5f); }\n"
      << "inline float fracf(float a, float b) { return b > 0 ? a / b : 0; "
         "}\n"
-     << "} // namespace gen_detail\n\n"
-     << "// host registration manifest: load each path, register under "
+     << "} // namespace gen_detail\n\n";
+  if (opt.rectLog) {
+    os << "// the rect gate's hook: absolute rect per widget, document "
+          "order\n"
+       << "struct RectLog {\n"
+       << "  virtual ~RectLog() = default;\n"
+       << "  virtual void add(std::string_view tag, std::string_view "
+          "name,\n"
+       << "                   float x, float y, float w, float h) = 0;\n"
+       << "};\n\n";
+  }
+  os << "// host registration manifest: load each path, register under "
         "its id\n"
      << "struct TexRef { ui::TextureId id; std::string_view path; };\n"
      << "inline constexpr TexRef k" << fn << "_textures[] = {\n";
@@ -613,13 +779,16 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
   os << "};\n\n"
      << "template <class Sink>\n"
      << "void " << fn
-     << "(const UiSnapshot &s, float screenW, float screenH, Sink &sink) "
-        "{\n"
+     << "(const UiSnapshot &s, float screenW, float screenH, Sink &sink"
+     << (opt.rectLog ? ", RectLog *log = nullptr" : "") << ") {\n"
      << "  using gen_detail::R;\n"
      << "  (void)s;\n"
      << "  const float W = screenW, H = screenH;\n"
      << "  (void)W;\n"
-     << e.body.str() << "}\n\n"
+     << "  // ---- rect variables (parent-relative) ----\n"
+     << e.decl.str() << "  // ---- solve (the schedule) ----\n"
+     << e.solve.str() << "  // ---- draw (render order, absolute) ----\n"
+     << e.draw.str() << "}\n\n"
      << "} // namespace " << opt.ns << "\n";
   return os.str();
 }

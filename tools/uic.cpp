@@ -13,12 +13,14 @@
 
 int main(int argc, char **argv) {
   bool dump = false;
+  bool rectLog = false;
   std::string schemaOut;
   std::string emitOut;
   std::string assetRoot;
   std::string schemaInclude = "generated/UiSnapshot.h";
   std::string ns = "hud";
   std::vector<std::string> files;
+  std::vector<std::string> styleFiles;
   for (int i = 1; i < argc; ++i) {
     auto next = [&]() -> const char * {
       if (i + 1 >= argc) {
@@ -35,6 +37,10 @@ int main(int argc, char **argv) {
       emitOut = next();
     } else if (std::strcmp(argv[i], "--assets") == 0) {
       assetRoot = next();
+    } else if (std::strcmp(argv[i], "--styles") == 0) {
+      styleFiles.emplace_back(next());
+    } else if (std::strcmp(argv[i], "--rect-log") == 0) {
+      rectLog = true;
     } else if (std::strcmp(argv[i], "--schema-include") == 0) {
       schemaInclude = next();
     } else if (std::strcmp(argv[i], "--namespace") == 0) {
@@ -109,6 +115,39 @@ int main(int argc, char **argv) {
       opt.ns = ns;
       opt.schemaInclude = schemaInclude;
       opt.assetRoot = assetRoot;
+      opt.rectLog = rectLog;
+      // style modules: parsed once, owned here for the emit's duration
+      std::vector<uic::Module> styleModules;
+      styleModules.reserve(styleFiles.size());
+      bool stylesOk = true;
+      for (const std::string &sf : styleFiles) {
+        std::ifstream sin(sf, std::ios::binary);
+        if (!sin) {
+          std::fprintf(stderr, "%s: cannot read style module\n",
+                       sf.c_str());
+          stylesOk = false;
+          break;
+        }
+        std::ostringstream sss;
+        sss << sin.rdbuf();
+        std::vector<uic::Diag> sd;
+        styleModules.push_back(uic::parseModule(sss.str(), sf, sd));
+        for (const uic::Diag &d : sd) {
+          std::fprintf(stderr, "%s:%d:%d: %s\n", d.file.c_str(), d.line,
+                       d.col, d.msg.c_str());
+        }
+        if (uic::hasErrors(sd)) {
+          stylesOk = false;
+          break;
+        }
+      }
+      if (!stylesOk) {
+        ++failures;
+        continue;
+      }
+      for (const uic::Module &sm : styleModules) {
+        opt.styleModules.push_back(&sm);
+      }
       std::vector<uic::Diag> emitDiags;
       const std::string header = uic::emitPanelHeader(m, opt, emitDiags);
       int skips = 0;

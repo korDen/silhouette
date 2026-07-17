@@ -441,14 +441,18 @@ struct Emit {
 
 
   // Resolve `attr: match p { v: path; ... }` — the language's answer to
-  // interpolated assets. EVERY arm's asset is statically validated (a
-  // missing file is a hard error), and the scrutinee's
-  // folded value picks the one arm this instantiation draws.
+  // interpolated values. The scrutinee's folded value picks the one arm
+  // this instantiation draws. When the attr names an asset, every arm's
+  // path is statically validated (a missing file is a hard error);
+  // a match on any other attr (e.g. `style`) resolves to
+  // a name whose existence its own domain checks.
   std::string resolveMatch(const Attr &a) {
-    for (const MatchArm &arm : a.arms) {
-      if (!assetExists(arm.result)) {
-        err(a.line, "match '" + a.name + "' arm '" + arm.value +
-                        "': missing asset " + arm.result);
+    if (a.name == "texture" || a.name == "alphamaskfile") {
+      for (const MatchArm &arm : a.arms) {
+        if (!assetExists(arm.result)) {
+          err(a.line, "match '" + a.name + "' arm '" + arm.value +
+                          "': missing asset " + arm.result);
+        }
       }
     }
     const std::string picked = substitute(a.matchOn);

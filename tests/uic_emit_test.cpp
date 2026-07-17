@@ -452,6 +452,25 @@ TEST(UicEmit, MatchOverAnEnumPicksAndValidatesEachArm) {
   EXPECT_EQ(h.find("match"), std::string::npos); // resolved, not emitted
 }
 
+TEST(UicEmit, AMatchOnANonAssetAttrIsNotFileChecked) {
+  // a `style:` match resolves to a style NAME, not a file — the asset
+  // existence check must NOT fire (those bare names are no paths). The
+  // arm's domain (a style decl) is validated by whoever owns styles.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "style round_frame_mask { color: 1 1 1 1; }\n"
+      "style square_frame_mask { color: 0 0 0 1; }\n"
+      "template slot { in shape: round | square;\n"
+      "    image { texture: /art/x.tga; style: match shape {\n"
+      "        round: round_frame_mask;\n"
+      "        square: square_frame_mask;\n"
+      "    } } }\n"
+      "panel { slot { shape: square; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_EQ(h.find("match"), std::string::npos); // resolved to square's style
+}
+
 TEST(UicEmit, AnEnumArgOutsideItsSetIsLoud) {
   std::vector<uic::Diag> diags;
   emit("template slot { in shape: round | square;\n"

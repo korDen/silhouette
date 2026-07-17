@@ -7,6 +7,7 @@
   <ItemGroup>
     <ClCompile Include="tools\uic.cpp" />
     <ClCompile Include="src\uic\parse.cpp" />
+    <ClCompile Include="src\uic\schema.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\uic\lex.hpp" />

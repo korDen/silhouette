@@ -95,6 +95,7 @@ struct TemplateDecl {
 struct StructField {
   std::string name;
   std::string type;
+  int arrayLen = 0; // 0 = scalar; N = `type[N]` fixed array
   std::string defaultValue;
   bool hasDefault = false;
   int line = 0;
@@ -103,6 +104,18 @@ struct StructField {
 struct StructDecl {
   std::string name;
   std::vector<StructField> fields;
+  int line = 0;
+};
+
+struct EnumEntry {
+  std::string name;
+  std::string value; // explicit value token; "" = implicit
+  bool hasValue = false;
+};
+
+struct EnumDecl {
+  std::string name;
+  std::vector<EnumEntry> entries;
   int line = 0;
 };
 
@@ -147,6 +160,7 @@ struct Module {
   std::vector<Import> imports;
   std::vector<ConstDecl> consts;
   std::vector<StructDecl> structs;
+  std::vector<EnumDecl> enums;
   std::vector<StyleDecl> styles;
   std::vector<FnDecl> fns;
   std::vector<TemplateDecl> templates;

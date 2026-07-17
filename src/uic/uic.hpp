@@ -27,4 +27,10 @@ Module parseModule(std::string_view source, std::string_view fileName,
 // Deterministic tree dump — the parser tests' comparison form.
 std::string dumpModule(const Module &m);
 
+// The schema pass: a schema module (structs + enums) becomes a
+// self-contained C++ header in namespace `ns` — trivially copyable
+// snapshot types, machine-asserted. Type errors land in `diags`.
+std::string emitSchemaHeader(const Module &m, std::string_view ns,
+                             std::vector<Diag> &diags);
+
 } // namespace uic

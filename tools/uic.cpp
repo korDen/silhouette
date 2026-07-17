@@ -13,10 +13,23 @@
 
 int main(int argc, char **argv) {
   bool dump = false;
+  std::string schemaOut;
+  std::string ns = "hud";
   std::vector<std::string> files;
   for (int i = 1; i < argc; ++i) {
+    auto next = [&]() -> const char * {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "%s wants a value\n", argv[i]);
+        std::exit(2);
+      }
+      return argv[++i];
+    };
     if (std::strcmp(argv[i], "--dump") == 0) {
       dump = true;
+    } else if (std::strcmp(argv[i], "--schema") == 0) {
+      schemaOut = next();
+    } else if (std::strcmp(argv[i], "--namespace") == 0) {
+      ns = next();
     } else if (argv[i][0] == '-') {
       std::fprintf(stderr, "unknown option %s\n", argv[i]);
       return 2;
@@ -24,8 +37,10 @@ int main(int argc, char **argv) {
       files.emplace_back(argv[i]);
     }
   }
-  if (files.empty()) {
-    std::fprintf(stderr, "usage: uic [--dump] <file.ui>...\n");
+  if (files.empty() || (!schemaOut.empty() && files.size() != 1)) {
+    std::fprintf(stderr,
+                 "usage: uic [--dump] <file.ui>...\n"
+                 "       uic --schema <out.h> [--namespace NS] <schema.ui>\n");
     return 2;
   }
 
@@ -52,6 +67,26 @@ int main(int argc, char **argv) {
     }
     if (dump) {
       std::fputs(uic::dumpModule(m).c_str(), stdout);
+    }
+    if (!schemaOut.empty() && diags.empty()) {
+      std::vector<uic::Diag> schemaDiags;
+      const std::string header = uic::emitSchemaHeader(m, ns, schemaDiags);
+      for (const uic::Diag &d : schemaDiags) {
+        std::fprintf(stderr, "%s:%d: %s\n", d.file.c_str(), d.line,
+                     d.msg.c_str());
+      }
+      if (!schemaDiags.empty()) {
+        ++failures;
+        continue;
+      }
+      std::ofstream out(schemaOut, std::ios::binary);
+      if (!out) {
+        std::fprintf(stderr, "%s: cannot write\n", schemaOut.c_str());
+        ++failures;
+        continue;
+      }
+      out << header;
+      std::printf("schema -> %s\n", schemaOut.c_str());
     }
   }
   return failures == 0 ? 0 : 1;

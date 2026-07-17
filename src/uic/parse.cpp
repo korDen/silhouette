@@ -6,6 +6,7 @@
 #include "uic/uic.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <sstream>
 
 namespace uic {
@@ -153,6 +154,9 @@ private:
     if (t.text == "struct") {
       return parseStruct(m);
     }
+    if (t.text == "enum") {
+      return parseEnum(m);
+    }
     if (t.text == "style") {
       return parseStyle(m);
     }
@@ -288,6 +292,18 @@ private:
         continue;
       }
       f.type = std::string(ty.text);
+      if (eat(Tok::kLBracket)) { // `type[N]` fixed array
+        if (!at(Tok::kNumber)) {
+          error(peek(), "expected array length");
+          sync();
+          continue;
+        }
+        f.arrayLen = std::atoi(std::string(take().text).c_str());
+        if (!expect(Tok::kRBracket, "']'")) {
+          sync();
+          continue;
+        }
+      }
       if (eat(Tok::kEq)) {
         f.defaultValue = raw();
         f.hasDefault = true;
@@ -298,6 +314,41 @@ private:
     }
     expect(Tok::kRBrace, "'}'");
     m.structs.push_back(std::move(s));
+    return true;
+  }
+
+  bool parseEnum(Module &m) {
+    EnumDecl e;
+    e.line = take().line; // 'enum'
+    const Token n = expectIdent("enum name");
+    if (n.kind != Tok::kIdent || !expect(Tok::kLBrace, "'{'")) {
+      return false;
+    }
+    e.name = std::string(n.text);
+    while (!at(Tok::kRBrace) && !at(Tok::kEnd)) {
+      EnumEntry entry;
+      const Token en = expectIdent("enum entry");
+      if (en.kind != Tok::kIdent) {
+        sync();
+        continue;
+      }
+      entry.name = std::string(en.text);
+      if (eat(Tok::kEq)) {
+        if (!at(Tok::kNumber)) {
+          error(peek(), "expected enum value");
+          sync();
+          continue;
+        }
+        entry.value = std::string(take().text);
+        entry.hasValue = true;
+      }
+      e.entries.push_back(std::move(entry));
+      if (!eat(Tok::kComma)) {
+        break; // trailing comma optional
+      }
+    }
+    expect(Tok::kRBrace, "'}'");
+    m.enums.push_back(std::move(e));
     return true;
   }
 
@@ -943,10 +994,23 @@ std::string dumpModule(const Module &m) {
     os << "struct " << s.name << " {";
     for (const StructField &f : s.fields) {
       os << ' ' << f.name << ": " << f.type;
+      if (f.arrayLen > 0) {
+        os << '[' << f.arrayLen << ']';
+      }
       if (f.hasDefault) {
         os << " = `" << f.defaultValue << "`";
       }
       os << ';';
+    }
+    os << " }\n";
+  }
+  for (const EnumDecl &e : m.enums) {
+    os << "enum " << e.name << " {";
+    for (size_t k = 0; k < e.entries.size(); ++k) {
+      os << (k != 0 ? ", " : " ") << e.entries[k].name;
+      if (e.entries[k].hasValue) {
+        os << '=' << e.entries[k].value;
+      }
     }
     os << " }\n";
   }

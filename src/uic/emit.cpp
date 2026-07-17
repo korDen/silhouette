@@ -293,11 +293,50 @@ struct Emit {
 
   // ---- expressions (binds) ----------------------------------------------
 
+  // the inline-enum value set of an atom that names an inline-enum param
+  // of an enclosing instantiation (a schema field's set needs walking the
+  // struct decls — not resolved here yet, so a field returns null)
+  const std::vector<std::string> *inlineEnumSet(const Expr &e) const {
+    if (e.kind != Expr::kIdent) {
+      return nullptr;
+    }
+    for (auto it = declStack.rbegin(); it != declStack.rend(); ++it) {
+      for (const InParam &p : (*it)->ins) {
+        if (p.name == e.text && p.isEnum()) {
+          return &p.enumValues;
+        }
+      }
+    }
+    return nullptr;
+  }
+
+  // one operand of an inline-enum comparison: a bare VALUE lowers to its
+  // sid (validated against the set); the param and a uint32_t field
+  // defer to expr() (the param folds to a sid there, the field already
+  // IS a sid)
+  std::string exprEnum(const Expr &e, const std::vector<std::string> *set) {
+    if (e.kind == Expr::kIdent && e.text != "snapshot" &&
+        inlineEnumSet(e) == nullptr && substitute(e.text) == e.text) {
+      for (const std::string &v : *set) {
+        if (v == e.text) {
+          return "sid(\"" + e.text + "\")";
+        }
+      }
+      err(e.line, "'" + e.text + "' is not a value of this enum");
+      return "0";
+    }
+    return expr(e);
+  }
+
   std::string expr(const Expr &e) {
     switch (e.kind) {
     case Expr::kIdent: {
       if (e.text == "snapshot") {
         return "s";
+      }
+      // an inline-enum param folds to its string id (a uint32_t)
+      if (inlineEnumSet(e) != nullptr) {
+        return "sid(\"" + substitute(e.text) + "\")";
       }
       // a template parameter: the folded argument substitutes (typed
       // params — the value must itself be a valid expression)
@@ -386,6 +425,21 @@ struct Emit {
     case Expr::kUnary:
       return "(" + e.text + expr(*e.args[0]) + ")";
     case Expr::kBinary:
+      // an inline-enum comparison lowers both sides to sids; a bare value
+      // is validated against the set, and comparing two DIFFERENT sets is
+      // a type error even though both are uint32_t at runtime
+      if (e.text == "==" || e.text == "!=") {
+        const std::vector<std::string> *ls = inlineEnumSet(*e.args[0]);
+        const std::vector<std::string> *rs = inlineEnumSet(*e.args[1]);
+        if (ls != nullptr || rs != nullptr) {
+          if (ls != nullptr && rs != nullptr && *ls != *rs) {
+            err(e.line, "'" + e.text + "' between two different enum sets");
+          }
+          const std::vector<std::string> *set = ls != nullptr ? ls : rs;
+          return "(" + exprEnum(*e.args[0], set) + " " + e.text + " " +
+                 exprEnum(*e.args[1], set) + ")";
+        }
+      }
       return "(" + expr(*e.args[0]) + " " + e.text + " " +
              expr(*e.args[1]) + ")";
     case Expr::kTernary:

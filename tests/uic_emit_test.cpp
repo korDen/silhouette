@@ -452,6 +452,34 @@ TEST(UicEmit, MatchOverAnEnumPicksAndValidatesEachArm) {
   EXPECT_EQ(h.find("match"), std::string::npos); // resolved, not emitted
 }
 
+TEST(UicEmit, AnInlineEnumComparisonLowersToSids) {
+  // an inline-enum param and a bare value both become sid()s in a bind, so
+  // it's a uint32_t compare that folds at compile time (no shared type)
+  std::vector<uic::Diag> diags;
+  const std::string h = emit("template slot { in shape: round | square;\n"
+                             "    image { texture: /art/x.tga;\n"
+                             "        bind visible: shape == square; } }\n"
+                             "panel { slot { shape: square; } }\n",
+                             &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("sid(\"square\") == sid(\"square\")"), std::string::npos);
+}
+
+TEST(UicEmit, ComparingTwoDifferentEnumSetsIsLoud) {
+  // both sides are uint32_t at runtime, but the .ui type-check rejects
+  // comparing an {x,y} id to a {p,q} id (kept type-checked by design)
+  std::vector<uic::Diag> diags;
+  (void)emit("template t { in a: x | y; in b: p | q;\n"
+             "    image { texture: /art/x.tga; bind visible: a == b; } }\n"
+             "panel { t { a: x; b: p; } }\n",
+             &diags);
+  bool loud = false;
+  for (const uic::Diag &d : diags) {
+    loud = loud || d.msg.find("different enum sets") != std::string::npos;
+  }
+  EXPECT_TRUE(loud);
+}
+
 TEST(UicEmit, AMatchArgProjectsAFusedEnumBackToAComponent) {
   // a two-param hole fuses to one enum; a child that
   // wants just one of them gets it decoupled with a match ARG — the fusion

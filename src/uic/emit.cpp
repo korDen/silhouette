@@ -28,6 +28,7 @@
 #include <deque>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -172,6 +173,9 @@ struct SolvedW {
   int idx = -1;
   const Node *node = nullptr;
   std::map<std::string, std::string> attrs; // effective, substituted
+  // bind target -> transpiled C++ (captured at SOLVE time, while the
+  // instantiation's param environment is still on the stack)
+  std::map<std::string, std::string> binds;
   std::vector<SolvedW *> kids;
   bool reverse = false;
 };
@@ -190,6 +194,7 @@ struct Emit {
   std::map<std::string, std::string> assetConsts;
   std::map<std::string, const StyleDecl *> styles;
   std::map<std::string, const TemplateDecl *> templates;
+  std::set<std::string> enumNames; // schema enums -> scope-resolved refs
   std::deque<SolvedW> arena;
   std::vector<std::map<std::string, std::string>> envStack;
   int instanceDepth = 0;
@@ -248,12 +253,24 @@ struct Emit {
 
   std::string expr(const Expr &e) {
     switch (e.kind) {
-    case Expr::kIdent:
+    case Expr::kIdent: {
       if (e.text == "snapshot") {
         return "s";
       }
+      // a template parameter: the folded argument substitutes (typed
+      // params — the value must itself be a valid expression)
+      const std::string sub = substitute(e.text);
+      if (sub != e.text) {
+        std::string out = sub;
+        const size_t at = out.find("snapshot");
+        if (at != std::string::npos) {
+          out.replace(at, 8, "s");
+        }
+        return "(" + out + ")";
+      }
       err(e.line, "unknown identifier '" + e.text + "' in bind");
       return "0";
+    }
     case Expr::kNumber:
     case Expr::kBool:
       return e.text;
@@ -265,6 +282,12 @@ struct Emit {
       err(e.line, "literal kind not yet allowed in binds");
       return "0";
     case Expr::kField:
+      // an enum reference (Variant.Triple) scope-resolves against the
+      // schema module's declared enums
+      if (e.args[0]->kind == Expr::kIdent &&
+          enumNames.count(e.args[0]->text) != 0) {
+        return e.args[0]->text + "::" + e.text;
+      }
       return expr(*e.args[0]) + "." + e.text;
     case Expr::kIndex:
       return expr(*e.args[0]) + "[" + expr(*e.args[1]) + "]";
@@ -476,6 +499,11 @@ struct Emit {
     sw.attrs = bagOf(n);
     sw.idx = nextVar++;
     sw.reverse = flag(sw.attrs, "reverse", false);
+    // transpile binds NOW — the instantiation's param environment is
+    // gone by draw time
+    for (const Bind &b : n.binds) {
+      sw.binds[b.target] = expr(*b.expr);
+    }
     out.push_back(&sw);
 
     const std::string sfx = std::to_string(sw.idx);
@@ -516,11 +544,11 @@ struct Emit {
     };
     std::string wE = sizeExpr("width", "size", true);
     std::string hE = sizeExpr("height", "size", false);
-    if (const Bind *b = bind(n, "width")) {
-      wE = "R(" + pw + " * " + expr(*b->expr) + ")"; // interim fraction law
+    if (auto b = sw.binds.find("width"); b != sw.binds.end()) {
+      wE = "R(" + pw + " * " + b->second + ")"; // interim fraction law
     }
-    if (const Bind *b = bind(n, "height")) {
-      hE = "R(" + ph + " * " + expr(*b->expr) + ")";
+    if (auto b = sw.binds.find("height"); b != sw.binds.end()) {
+      hE = "R(" + ph + " * " + b->second + ")";
     }
     solveLine(vw + " = " + wE + ";");
     solveLine(vh + " = " + hE + ";");
@@ -601,12 +629,22 @@ struct Emit {
         const std::string cs = std::to_string(cw.idx);
         const std::string *cvis = get(cw.attrs, "visible");
         const bool hidden = cvis != nullptr && *cvis == "0";
+        // a BOUND visible gates occupancy at RUNTIME under the same
+        // flags — the one-shot equivalent of a visibility toggle +
+        // re-solve (this IS the emergent reflow)
+        const auto bv = cw.binds.find("visible");
+        const std::string dynVis =
+            bv != cw.binds.end() ? bv->second : std::string();
         const bool counts = !hidden || growinvis;
         const bool advances = !hidden || flag(cw.attrs, "stickytoinvis",
                                               true);
         if (grows && counts) {
-          solveLine("if (pass" + sfx + " == 0) { " + vw + " = std::max(" +
-                    vw + ", x" + cs + " + w" + cs + "); " + vh +
+          std::string cond = "pass" + sfx + " == 0";
+          if (!dynVis.empty() && !growinvis) {
+            cond += " && (" + dynVis + ")";
+          }
+          solveLine("if (" + cond + ") { " + vw + " = std::max(" + vw +
+                    ", x" + cs + " + w" + cs + "); " + vh +
                     " = std::max(" + vh + ", y" + cs + " + h" + cs +
                     "); }");
         }
@@ -614,7 +652,13 @@ struct Emit {
           const std::string cend = mainAxis == 'x'
                                        ? "x" + cs + " + w" + cs
                                        : "y" + cs + " + h" + cs;
-          solveLine(cursor + " = " + cend + " + " + spacing + ";");
+          if (!dynVis.empty() &&
+              !flag(cw.attrs, "stickytoinvis", true)) {
+            solveLine("if (" + dynVis + ") { " + cursor + " = " + cend +
+                      " + " + spacing + "; }");
+          } else {
+            solveLine(cursor + " = " + cend + " + " + spacing + ";");
+          }
         }
       }
     }
@@ -648,12 +692,13 @@ struct Emit {
                std::to_string(n.line));
       return;
     }
-    const Bind *bv = bind(n, "visible");
-    if (bv != nullptr) {
-      drawLine("if (" + expr(*bv->expr) + ") {");
+    const auto bv = sw.binds.find("visible");
+    const bool bound = bv != sw.binds.end();
+    if (bound) {
+      drawLine("if (" + bv->second + ") {");
       ++drawIndent;
     }
-    emitDraw(n, sw.attrs, ax, ay, "w" + sfx, "h" + sfx);
+    emitDraw(sw, ax, ay, "w" + sfx, "h" + sfx);
 
     // render order: solved order, reversed when reverse: 1 (layout
     // already ran in document order — the solve pass)
@@ -666,7 +711,7 @@ struct Emit {
         drawNode(*c, ax, ay);
       }
     }
-    if (bv != nullptr) { // a bound visible gates the subtree too
+    if (bound) { // a bound visible gates the subtree too
       --drawIndent;
       drawLine("}");
     }
@@ -686,11 +731,11 @@ struct Emit {
            ftos(c[2]) + ", " + ftos(c[3]) + "}";
   }
 
-  void emitDraw(const Node &n,
-                const std::map<std::string, std::string> &bag,
-                const std::string &ax,
+  void emitDraw(const SolvedW &sw, const std::string &ax,
                 const std::string &ay, const std::string &w,
                 const std::string &h) {
+    const Node &n = *sw.node;
+    const std::map<std::string, std::string> &bag = sw.attrs;
     const std::string dst =
         "{" + ax + ", " + ay + ", " + w + ", " + h + "}";
     if (n.tag == "frame") {
@@ -738,18 +783,19 @@ struct Emit {
     }
 
     const std::string *tex = get(bag, "texture");
-    const Bind *texBind = bind(n, "texture");
-    if (n.tag == "image" && tex == nullptr && texBind == nullptr) {
+    const auto texBind = sw.binds.find("texture");
+    const bool boundTex = texBind != sw.binds.end();
+    if (n.tag == "image" && tex == nullptr && !boundTex) {
       skip(n.line, "image without a resolvable texture");
       return;
     }
     if (tex != nullptr && *tex == "$invis") {
       return; // the dialect law: $invis draws nothing
     }
-    if (texBind != nullptr || (tex != nullptr && *tex != "$white")) {
+    if (boundTex || (tex != nullptr && *tex != "$white")) {
       std::string idExpr;
-      if (texBind != nullptr) {
-        idExpr = expr(*texBind->expr);
+      if (boundTex) {
+        idExpr = texBind->second;
       } else {
         std::string path = *tex;
         auto it = assetConsts.find(path);
@@ -787,6 +833,9 @@ struct Emit {
   void registerModule(const Module &mod) {
     for (const StyleDecl &s : mod.styles) {
       styles.emplace(s.name, &s);
+    }
+    for (const EnumDecl &e : mod.enums) {
+      enumNames.insert(e.name); // Variant.Triple -> Variant::Triple
     }
     for (const TemplateDecl &t : mod.templates) {
       templates.emplace(t.name, &t);

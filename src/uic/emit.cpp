@@ -821,7 +821,9 @@ struct Emit {
   // duration of the sink call (the Sink's string-lifetime contract).
   std::string textExpr(const SolvedW &sw) {
     if (auto b = sw.binds.find("content"); b != sw.binds.end()) {
-      return b->second;
+      // a bound run comes from the snapshot: adapt whatever it is
+      // (a schema char array, a view) to one borrowed run
+      return "gen_detail::sv(" + b->second + ")";
     }
     const std::string *c = get(sw.attrs, "content");
     return c == nullptr ? std::string("\"\"") : quotedLit(*c);
@@ -1326,7 +1328,9 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "#include \"" << opt.schemaInclude << "\"\n"
      << "#include \"paint/sink.hpp\"\n\n"
      << "#include <algorithm>\n"
+     << "#include <array>\n"
      << "#include <cmath>\n"
+     << "#include <cstddef>\n"
      << "#include <cstdint>\n"
      << "#include <string_view>\n\n"
      << "namespace " << opt.ns << " {\n"
@@ -1335,6 +1339,16 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "inline float R(float f) { return std::floor(f + 0.5f); }\n"
      << "inline float fracf(float a, float b) { return b > 0 ? a / b : 0; "
         "}\n"
+     << "// a text run's source: a schema char array is a run up to its\n"
+     << "// first NUL; a string_view is itself. Borrowed for the call\n"
+     << "// only — the Sink's string-lifetime contract.\n"
+     << "template <size_t N>\n"
+     << "inline std::string_view sv(const std::array<char, N> &a) {\n"
+     << "  size_t n = 0;\n"
+     << "  while (n < N && a[n] != '\\0') { ++n; }\n"
+     << "  return std::string_view(a.data(), n);\n"
+     << "}\n"
+     << "inline std::string_view sv(std::string_view s) { return s; }\n"
      << "} // namespace gen_detail\n\n";
   if (opt.rectLog) {
     os << "// the rect gate's hook: absolute rect per widget, document "

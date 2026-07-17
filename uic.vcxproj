@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- uic: the markup compiler (docs/ui-language.md) — a pure-std console
+     tool, never part of the library build (hosts compile it via their
+     regen scripts; this project exists for IDE iteration and the suite
+     shares its sources). -->
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="tools\uic.cpp" />
+    <ClCompile Include="src\uic\parse.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\uic\lex.hpp" />
+    <ClInclude Include="src\uic\ast.hpp" />
+    <ClInclude Include="src\uic\uic.hpp" />
+  </ItemGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="common.props" />
+  </ImportGroup>
+  <PropertyGroup>
+    <ConfigurationType>Application</ConfigurationType>
+    <ProjectGuid>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1103}</ProjectGuid>
+    <RootNamespace>uic</RootNamespace>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

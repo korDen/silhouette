@@ -11,6 +11,13 @@
     <ClCompile Include="tests\equivalence_test.cpp" />
     <ClCompile Include="tests\quality_raster_test.cpp" />
     <ClCompile Include="tests\quality_text_test.cpp" />
+    <ClCompile Include="tests\uic_parse_test.cpp" />
+    <ClCompile Include="src\uic\parse.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\uic\lex.hpp" />
+    <ClInclude Include="src\uic\ast.hpp" />
+    <ClInclude Include="src\uic\uic.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="silhouette.vcxproj">

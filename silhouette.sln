@@ -4,6 +4,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "silhouette", "silhouette.vc
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "silhouette_tests", "silhouette_tests.vcxproj", "{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "uic", "uic.vcxproj", "{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1103}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -23,6 +25,12 @@ Global
 		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}.DebugAsan|x64.Build.0 = DebugAsan|x64
 		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}.Release|x64.ActiveCfg = Release|x64
 		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1101}.Release|x64.Build.0 = Release|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1103}.Debug|x64.ActiveCfg = Debug|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1103}.Debug|x64.Build.0 = Debug|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1103}.DebugAsan|x64.ActiveCfg = DebugAsan|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1103}.DebugAsan|x64.Build.0 = DebugAsan|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1103}.Release|x64.ActiveCfg = Release|x64
+		{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1103}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -14,18 +14,13 @@
     <ClCompile Include="tests\uic_parse_test.cpp" />
     <ClCompile Include="tests\uic_schema_test.cpp" />
     <ClCompile Include="tests\uic_emit_test.cpp" />
-    <ClCompile Include="src\uic\parse.cpp" />
-    <ClCompile Include="src\uic\schema.cpp" />
-    <ClCompile Include="src\uic\emit.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="src\uic\lex.hpp" />
-    <ClInclude Include="src\uic\ast.hpp" />
-    <ClInclude Include="src\uic\uic.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="silhouette.vcxproj">
       <Project>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1102}</Project>
+    </ProjectReference>
+    <ProjectReference Include="uic_lib.vcxproj">
+      <Project>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1104}</Project>
     </ProjectReference>
   </ItemGroup>
   <ImportGroup Label="PropertySheets">

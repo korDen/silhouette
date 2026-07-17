@@ -1,19 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- uic: the markup compiler (docs/ui-language.md) — a pure-std console
-     tool, never part of the library build (hosts compile it via their
-     regen scripts; this project exists for IDE iteration and the suite
-     shares its sources). -->
+<!-- uic: the markup compiler CLI (docs/ui-language.md) — never part of
+     the library build (hosts build it from the solution and run it by
+     hand; codegen outputs are committed). The core lives in uic_lib. -->
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="tools\uic.cpp" />
-    <ClCompile Include="src\uic\parse.cpp" />
-    <ClCompile Include="src\uic\schema.cpp" />
-    <ClCompile Include="src\uic\emit.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\uic\lex.hpp" />
-    <ClInclude Include="src\uic\ast.hpp" />
-    <ClInclude Include="src\uic\uic.hpp" />
+    <ProjectReference Include="uic_lib.vcxproj">
+      <Project>{7A3C1E20-51B2-4D9E-9C61-0F2D8A4B1104}</Project>
+    </ProjectReference>
   </ItemGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="common.props" />

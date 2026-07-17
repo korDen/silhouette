@@ -176,6 +176,11 @@ struct SolvedW {
   // bind target -> transpiled C++ (captured at SOLVE time, while the
   // instantiation's param environment is still on the stack)
   std::map<std::string, std::string> binds;
+  // structural-if arm guard (transpiled C++): when false this widget
+  // does not EXIST — no union growth, no cursor advance, no draws.
+  // Absence, not invisibility: gates regardless of growinvis and
+  // stickytoinvis (unlike a bound visible).
+  std::string guard;
   std::vector<SolvedW *> kids;
   bool reverse = false;
 };
@@ -432,8 +437,43 @@ struct Emit {
   void solveInto(std::vector<SolvedW *> &out, const Node &n,
                  const std::string &pw, const std::string &ph,
                  const std::string &cursor, const char mainAxis) {
+    if (n.kind == Node::kIf) {
+      // structural if — per-arm occupancy gating: arm N lowers to the
+      // guard cond_N && !cond_0 && ... && !cond_(N-1) (the else arm =
+      // all conditions negated), attached to every widget instance the
+      // arm's body solves into. Conditions transpile NOW — the
+      // instantiation's param environment is still on the stack.
+      std::string notPrior;
+      for (const IfArm &arm : n.arms) {
+        const std::string cond =
+            arm.cond != nullptr ? expr(*arm.cond) : std::string();
+        std::string g;
+        if (!cond.empty() && !notPrior.empty()) {
+          g = "(" + cond + ") && " + notPrior;
+        } else if (!cond.empty()) {
+          g = cond;
+        } else {
+          g = notPrior; // the else arm
+        }
+        for (const NodePtr &b : arm.body) {
+          const size_t before = out.size();
+          solveInto(out, *b, pw, ph, cursor, mainAxis);
+          for (size_t k = before; k < out.size(); ++k) {
+            SolvedW &cw = *out[k];
+            cw.guard = cw.guard.empty()
+                           ? g
+                           : "(" + g + ") && (" + cw.guard + ")";
+          }
+        }
+        if (!cond.empty()) {
+          const std::string neg = "!(" + cond + ")";
+          notPrior = notPrior.empty() ? neg : notPrior + " && " + neg;
+        }
+      }
+      return;
+    }
     if (n.kind != Node::kWidget) {
-      skip(n.line, n.kind == Node::kIf ? "if arms" : "widgetstate");
+      skip(n.line, "widgetstate");
       return;
     }
     if (n.tag != "panel" && n.tag != "image" && n.tag != "frame") {
@@ -643,6 +683,11 @@ struct Emit {
           if (!dynVis.empty() && !growinvis) {
             cond += " && (" + dynVis + ")";
           }
+          // a structural-if guard is ABSENCE: it gates the union
+          // regardless of growinvis
+          if (!cw.guard.empty()) {
+            cond += " && (" + cw.guard + ")";
+          }
           solveLine("if (" + cond + ") { " + vw + " = std::max(" + vw +
                     ", x" + cs + " + w" + cs + "); " + vh +
                     " = std::max(" + vh + ", y" + cs + " + h" + cs +
@@ -652,9 +697,17 @@ struct Emit {
           const std::string cend = mainAxis == 'x'
                                        ? "x" + cs + " + w" + cs
                                        : "y" + cs + " + h" + cs;
-          if (!dynVis.empty() &&
-              !flag(cw.attrs, "stickytoinvis", true)) {
-            solveLine("if (" + dynVis + ") { " + cursor + " = " + cend +
+          std::string gate;
+          if (!dynVis.empty() && !flag(cw.attrs, "stickytoinvis", true)) {
+            gate = dynVis;
+          }
+          // absence gates the chain advance regardless of stickytoinvis
+          if (!cw.guard.empty()) {
+            gate = gate.empty() ? cw.guard
+                                : "(" + cw.guard + ") && (" + gate + ")";
+          }
+          if (!gate.empty()) {
+            solveLine("if (" + gate + ") { " + cursor + " = " + cend +
                       " + " + spacing + "; }");
           } else {
             solveLine(cursor + " = " + cend + " + " + spacing + ";");
@@ -693,9 +746,15 @@ struct Emit {
       return;
     }
     const auto bv = sw.binds.find("visible");
-    const bool bound = bv != sw.binds.end();
+    std::string gate =
+        bv != sw.binds.end() ? bv->second : std::string();
+    if (!sw.guard.empty()) { // structural-if arm: the subtree may not exist
+      gate = gate.empty() ? sw.guard
+                          : "(" + sw.guard + ") && (" + gate + ")";
+    }
+    const bool bound = !gate.empty();
     if (bound) {
-      drawLine("if (" + bv->second + ") {");
+      drawLine("if (" + gate + ") {");
       ++drawIndent;
     }
     emitDraw(sw, ax, ay, "w" + sfx, "h" + sfx);

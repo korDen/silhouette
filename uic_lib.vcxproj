@@ -8,6 +8,7 @@
     <ClCompile Include="src\uic\parse.cpp" />
     <ClCompile Include="src\uic\schema.cpp" />
     <ClCompile Include="src\uic\emit.cpp" />
+    <ClCompile Include="src\uic\print.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\uic\lex.hpp" />

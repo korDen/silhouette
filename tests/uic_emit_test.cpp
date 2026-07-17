@@ -220,6 +220,31 @@ TEST(UicEmit, InstantiationDiagnostics) {
   EXPECT_FALSE(uic::hasErrors(diags)); // degradation, not failure
 }
 
+TEST(UicEmit, StructuralIfLowersToAbsenceGuards) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { grow: 1; growinvis: 1; float: right;\n"
+      "    if (snapshot.stash.open) {\n"
+      "        panel { width: 10h; height: 3h; }\n"
+      "    } else {\n"
+      "        panel { width: 5h; height: 3h; }\n"
+      "    }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // absence, not invisibility: the guard gates the union even under
+  // growinvis=1, gates the chain advance, and gates the draws — arm 2
+  // is the negation of arm 1
+  EXPECT_NE(h.find("pass0 == 0 && (s.stash.open)"), std::string::npos);
+  EXPECT_NE(h.find("pass0 == 0 && (!(s.stash.open))"), std::string::npos);
+  EXPECT_NE(h.find("if (s.stash.open) { cur0 = x1 + w1"),
+            std::string::npos);
+  EXPECT_NE(h.find("if (!(s.stash.open)) { cur0 = x2 + w2"),
+            std::string::npos);
+  EXPECT_NE(h.find("if (s.stash.open) {\n"), std::string::npos); // draw gate
+  EXPECT_EQ(h.find("SKIP"), std::string::npos); // nothing degraded
+}
+
 TEST(UicEmit, HiddenChildOccupancyLaws) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

@@ -38,6 +38,11 @@ Module parseModule(std::string_view source, std::string_view fileName,
 // Deterministic tree dump — the parser tests' comparison form.
 std::string dumpModule(const Module &m);
 
+// The printer: AST -> canonical .ui text. The one writer of .ui files
+// (hosts transform the AST and print here); parse(print(m)) reproduces
+// m exactly — comments are not part of the AST and do not survive.
+std::string printModule(const Module &m);
+
 // The schema pass: a schema module (structs + enums) becomes a
 // self-contained C++ header in namespace `ns` — trivially copyable
 // snapshot types, machine-asserted. Type errors land in `diags`.

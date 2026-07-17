@@ -94,6 +94,75 @@ TEST(UicPrint, PrintIsAFixpoint) {
   EXPECT_EQ(once, uic::printModule(m2));
 }
 
+// comments are TRIVIA on the AST and survive the printer: banners,
+// open-line trails (provenance), attr leads (`// was:` records),
+// between-children notes, body tails, and module tails
+TEST(UicPrint, CommentsSurviveTheRoundTrip) {
+  constexpr char kSrc[] =
+      "// GENERATED banner line one\n"
+      "// banner line two\n"
+      "\n"
+      "template chip { // :186\n"
+      "    in slot: num;\n"
+      "    panel { // :187\n"
+      "        // was: onloadlua=\"Host:Foo(self)\"\n"
+      "        width: 7h;\n"
+      "        // between children\n"
+      "        image { texture: /art/icon.img; } // :188\n"
+      "        // trailing note\n"
+      "    }\n"
+      "}\n"
+      "\n"
+      "// a root note\n"
+      "panel {\n"
+      "    chip { slot: 0; } // :293\n"
+      "}\n"
+      "// module tail\n";
+  std::vector<uic::Diag> d1;
+  const uic::Module m1 = uic::parseModule(kSrc, "c.ui", d1);
+  ASSERT_FALSE(uic::hasErrors(d1)) << d1[0].msg;
+
+  ASSERT_EQ(m1.templates.size(), 1u);
+  const uic::TemplateDecl &t = m1.templates[0];
+  ASSERT_EQ(t.lead.size(), 2u);
+  EXPECT_EQ(t.lead[0], "GENERATED banner line one");
+  EXPECT_EQ(t.trail, ":186");
+  ASSERT_EQ(t.body.size(), 1u);
+  const uic::Node &panel = *t.body[0];
+  EXPECT_EQ(panel.trail, ":187");
+  ASSERT_EQ(panel.attrs.size(), 1u);
+  ASSERT_EQ(panel.attrs[0].lead.size(), 1u);
+  EXPECT_EQ(panel.attrs[0].lead[0], "was: onloadlua=\"Host:Foo(self)\"");
+  ASSERT_EQ(panel.children.size(), 1u);
+  ASSERT_EQ(panel.children[0]->lead.size(), 1u);
+  EXPECT_EQ(panel.children[0]->lead[0], "between children");
+  EXPECT_EQ(panel.children[0]->trail, ":188");
+  ASSERT_EQ(panel.bodyTail.size(), 1u);
+  EXPECT_EQ(panel.bodyTail[0], "trailing note");
+  ASSERT_EQ(m1.roots.size(), 1u);
+  ASSERT_EQ(m1.roots[0]->lead.size(), 1u);
+  EXPECT_EQ(m1.roots[0]->lead[0], "a root note");
+  ASSERT_EQ(m1.roots[0]->children.size(), 1u);
+  EXPECT_EQ(m1.roots[0]->children[0]->trail, ":293");
+  ASSERT_EQ(m1.tail.size(), 1u);
+  EXPECT_EQ(m1.tail[0], "module tail");
+
+  // print -> reparse: the trivia re-attaches identically
+  const std::string printed = uic::printModule(m1);
+  std::vector<uic::Diag> d2;
+  const uic::Module m2 = uic::parseModule(printed, "c.ui", d2);
+  ASSERT_FALSE(uic::hasErrors(d2)) << printed;
+  EXPECT_EQ(uic::dumpModule(m1), uic::dumpModule(m2));
+  ASSERT_EQ(m2.templates.size(), 1u);
+  EXPECT_EQ(m2.templates[0].lead, t.lead);
+  EXPECT_EQ(m2.templates[0].trail, t.trail);
+  EXPECT_EQ(m2.templates[0].body[0]->attrs[0].lead, panel.attrs[0].lead);
+  EXPECT_EQ(m2.templates[0].body[0]->bodyTail, panel.bodyTail);
+  EXPECT_EQ(m2.roots[0]->children[0]->trail, ":293");
+  EXPECT_EQ(m2.tail, m1.tail);
+  EXPECT_EQ(printed, uic::printModule(m2)); // and printing is a fixpoint
+}
+
 // operator precedence survives: a parenthesized || under && must keep
 // its parens, a natural chain must not grow any
 TEST(UicPrint, ExpressionParensFollowPrecedence) {

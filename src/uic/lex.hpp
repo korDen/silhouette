@@ -14,9 +14,21 @@
 // position (the lexer tracks whether the previous significant token
 // can end an operand — the classic regex-literal rule).
 #include <cctype>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace uic {
+
+// a comment captured while skipping trivia — the parser attaches it to
+// the AST (lead/trail) so the printer, the one writer of .ui files,
+// reproduces provenance and `// was:` records
+struct LexComment {
+  std::string text; // sans the "//" and one leading space
+  int line = 0;
+  bool ownLine = false; // nothing but whitespace before it on its line
+};
 
 enum class Tok {
   kEnd,
@@ -67,6 +79,22 @@ public:
   explicit Lexer(std::string_view src) : src_(src) {}
 
   Token next() {
+    Token t = nextImpl();
+    if (t.kind != Tok::kEnd) {
+      lastContentLine_ = line_;
+    }
+    return t;
+  }
+
+  // comments captured since the last take — order preserved
+  std::vector<LexComment> takeComments() {
+    std::vector<LexComment> out = std::move(comments_);
+    comments_.clear();
+    return out;
+  }
+
+private:
+  Token nextImpl() {
     skipTrivia();
     Token t;
     t.line = line_;
@@ -209,6 +237,7 @@ public:
     return t;
   }
 
+public:
   // RAW mode: everything up to the terminating ';' (consumed), trimmed.
   // Quote-aware: a ';' inside a quoted text segment does not terminate
   // (text is the one quoted thing, and text may contain anything). A
@@ -239,6 +268,7 @@ public:
       --end;
     }
     prevOperand_ = false;
+    lastContentLine_ = line_;
     return src_.substr(start, end - start);
   }
   bool rawTerminated() const { return rawTerminated_; }
@@ -264,6 +294,7 @@ public:
     advance();
     advance();
     prevOperand_ = false;
+    lastContentLine_ = line_;
     return true;
   }
 
@@ -288,9 +319,25 @@ private:
       }
       if (pos_ + 1 < src_.size() && src_[pos_] == '/' &&
           src_[pos_ + 1] == '/') {
+        LexComment c;
+        c.line = line_;
+        c.ownLine = line_ != lastContentLine_;
+        advance();
+        advance();
+        if (pos_ < src_.size() && src_[pos_] == ' ') {
+          advance(); // one leading space is formatting, not content
+        }
+        const size_t start = pos_;
         while (pos_ < src_.size() && src_[pos_] != '\n') {
           advance();
         }
+        size_t end = pos_;
+        while (end > start &&
+               std::isspace((unsigned char)src_[end - 1]) != 0) {
+          --end;
+        }
+        c.text = std::string(src_.substr(start, end - start));
+        comments_.push_back(std::move(c));
         continue;
       }
       return;
@@ -350,8 +397,10 @@ private:
   std::string_view src_;
   size_t pos_ = 0;
   int line_ = 1, col_ = 1;
+  int lastContentLine_ = 0;
   bool prevOperand_ = false;
   bool rawTerminated_ = false;
+  std::vector<LexComment> comments_;
 };
 
 } // namespace uic

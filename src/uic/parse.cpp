@@ -33,10 +33,12 @@ public:
       m.name.erase(dot);
     }
     while (peek().kind != Tok::kEnd) {
+      drainComments(pendingLead_, nullptr, 0);
       if (!parseItem(m)) {
         sync();
       }
     }
+    drainComments(m.tail, nullptr, 0);
     return m;
   }
 
@@ -136,6 +138,46 @@ private:
     return v;
   }
 
+  // ---- comment trivia -------------------------------------------------------
+
+  void pumpComments() {
+    for (LexComment &c : lex_.takeComments()) {
+      commentQ_.push_back(std::move(c));
+    }
+  }
+
+  // move captured comments into `lead`; the end-of-line comment of the
+  // enclosing construct's open line (if any) becomes its trail
+  void drainComments(std::vector<std::string> &lead, std::string *trail,
+                     int trailLine) {
+    pumpComments();
+    for (LexComment &c : commentQ_) {
+      if (!c.ownLine && trail != nullptr && trail->empty() &&
+          c.line == trailLine) {
+        *trail = std::move(c.text);
+      } else {
+        lead.push_back(std::move(c.text));
+      }
+    }
+    commentQ_.clear();
+  }
+
+  // the end-of-line comment sitting on `line` (a construct's CLOSING
+  // line — `chip { ... } // :293`), pulled selectively; own-line
+  // comments stay queued for the next drain
+  std::string takeTrail(int line) {
+    peek(); // force the next token so any same-line comment is captured
+    pumpComments();
+    for (auto it = commentQ_.begin(); it != commentQ_.end(); ++it) {
+      if (!it->ownLine && it->line == line) {
+        std::string s = std::move(it->text);
+        commentQ_.erase(it);
+        return s;
+      }
+    }
+    return std::string();
+  }
+
   // ---- module items --------------------------------------------------------
 
   bool parseItem(Module &m) {
@@ -175,9 +217,16 @@ private:
       return parseFn(m, /*isNative=*/true);
     }
     // a top-level widget tree
+    std::vector<std::string> lead = std::move(pendingLead_);
+    pendingLead_.clear();
     NodePtr n = parseNode();
     if (n == nullptr) {
       return false;
+    }
+    n->lead = std::move(lead);
+    const int closeLine = lex_.line();
+    if (n->kind != Node::kIf && n->trail.empty()) {
+      n->trail = takeTrail(closeLine);
     }
     m.roots.push_back(std::move(n));
     return true;
@@ -185,6 +234,7 @@ private:
 
   bool parseImport(Module &m) {
     Import imp;
+    pendingLead_.clear(); // imports/schema decls carry no trivia (yet)
     imp.line = take().line; // 'import'
     if (!expect(Tok::kLBrace, "'{'")) {
       return false;
@@ -220,6 +270,8 @@ private:
 
   bool parseConst(Module &m) {
     ConstDecl c;
+    c.lead = std::move(pendingLead_);
+    pendingLead_.clear();
     c.line = take().line; // 'const'
     const Token n = expectIdent("const name");
     if (n.kind != Tok::kIdent) {
@@ -270,6 +322,7 @@ private:
   }
 
   bool parseStruct(Module &m) {
+    pendingLead_.clear();
     StructDecl s;
     s.line = take().line; // 'struct'
     const Token n = expectIdent("struct name");
@@ -318,6 +371,7 @@ private:
   }
 
   bool parseEnum(Module &m) {
+    pendingLead_.clear();
     EnumDecl e;
     e.line = take().line; // 'enum'
     const Token n = expectIdent("enum name");
@@ -354,14 +408,21 @@ private:
 
   bool parseStyle(Module &m) {
     StyleDecl s;
+    s.lead = std::move(pendingLead_);
+    pendingLead_.clear();
     s.line = take().line; // 'style'
     const Token n = expectIdent("style name");
-    if (n.kind != Tok::kIdent || !expect(Tok::kLBrace, "'{'")) {
+    if (n.kind != Tok::kIdent) {
+      return false;
+    }
+    const int openLine = peek().line;
+    if (!expect(Tok::kLBrace, "'{'")) {
       return false;
     }
     s.name = std::string(n.text);
     while (!at(Tok::kRBrace) && !at(Tok::kEnd)) {
       Attr a;
+      drainComments(a.lead, &s.trail, openLine);
       const Token f = expectIdent("attribute name");
       if (f.kind != Tok::kIdent || !expect(Tok::kColon, "':'")) {
         sync();
@@ -373,11 +434,13 @@ private:
       s.attrs.push_back(std::move(a));
     }
     expect(Tok::kRBrace, "'}'");
+    drainComments(s.bodyTail, &s.trail, openLine);
     m.styles.push_back(std::move(s));
     return true;
   }
 
   bool parseFn(Module &m, bool isNative) {
+    pendingLead_.clear();
     FnDecl f;
     f.isNative = isNative;
     f.line = take().line; // 'fn'
@@ -444,15 +507,24 @@ private:
 
   bool parseTemplate(Module &m) {
     TemplateDecl t;
+    t.lead = std::move(pendingLead_);
+    pendingLead_.clear();
     t.line = take().line; // 'template'
     const Token n = expectIdent("template name");
-    if (n.kind != Tok::kIdent || !expect(Tok::kLBrace, "'{'")) {
+    if (n.kind != Tok::kIdent) {
+      return false;
+    }
+    const int openLine = peek().line;
+    if (!expect(Tok::kLBrace, "'{'")) {
       return false;
     }
     t.name = std::string(n.text);
     while (!at(Tok::kRBrace) && !at(Tok::kEnd)) {
+      std::vector<std::string> lead;
+      drainComments(lead, &t.trail, openLine);
       if (atIdent("in")) {
         InParam p;
+        p.lead = std::move(lead);
         p.line = take().line;
         const Token pn = expectIdent("param name");
         if (pn.kind != Tok::kIdent || !expect(Tok::kColon, "':'")) {
@@ -480,9 +552,15 @@ private:
         sync();
         continue;
       }
+      node->lead = std::move(lead);
+      const int closeLine = lex_.line();
+      if (node->kind != Node::kIf && node->trail.empty()) {
+        node->trail = takeTrail(closeLine);
+      }
       t.body.push_back(std::move(node));
     }
     expect(Tok::kRBrace, "'}'");
+    drainComments(t.bodyTail, &t.trail, openLine);
     m.templates.push_back(std::move(t));
     return true;
   }
@@ -523,15 +601,19 @@ private:
   }
 
   bool parseBody(Node &n) {
+    const int openLine = peek().line;
     if (!expect(Tok::kLBrace, "'{'")) {
       return false;
     }
     while (!at(Tok::kRBrace) && !at(Tok::kEnd)) {
+      std::vector<std::string> lead;
+      drainComments(lead, &n.trail, openLine);
       // `bind`/`action` are keywords only when a target ident follows;
       // `bind: value;` is a plain attribute NAMED bind (ported trees
       // carry it — the source material's key-binding attribute)
       if (atIdent("bind") && !secondIsColon()) {
         Bind b;
+        b.lead = std::move(lead);
         b.line = take().line;
         const Token bn = expectIdent("bind target");
         if (bn.kind != Tok::kIdent || !expect(Tok::kColon, "':'")) {
@@ -550,6 +632,7 @@ private:
       }
       if (atIdent("action") && !secondIsColon()) {
         Action a;
+        a.lead = std::move(lead);
         a.line = take().line;
         const Token an = expectIdent("action event");
         if (an.kind != Tok::kIdent || !expect(Tok::kColon, "':'")) {
@@ -572,6 +655,11 @@ private:
           sync();
           continue;
         }
+        child->lead = std::move(lead);
+        const int closeLine = lex_.line();
+        if (child->kind != Node::kIf && child->trail.empty()) {
+          child->trail = takeTrail(closeLine);
+        }
         n.children.push_back(std::move(child));
         continue;
       }
@@ -587,9 +675,14 @@ private:
         child->kind = Node::kWidget;
         child->tag = std::string(head.text);
         child->line = head.line;
+        child->lead = std::move(lead);
         if (!parseBody(*child)) {
           sync();
           continue;
+        }
+        const int closeLine = lex_.line();
+        if (child->trail.empty()) {
+          child->trail = takeTrail(closeLine);
         }
         n.children.push_back(std::move(child));
         continue;
@@ -603,10 +696,13 @@ private:
       Attr a;
       a.name = std::string(head.text);
       a.line = head.line;
+      a.lead = std::move(lead);
       a.value = raw();
       n.attrs.push_back(std::move(a));
     }
-    return expect(Tok::kRBrace, "'}'");
+    const bool ok = expect(Tok::kRBrace, "'}'");
+    drainComments(n.bodyTail, &n.trail, openLine);
+    return ok;
   }
 
   NodePtr parseIf() {
@@ -649,10 +745,17 @@ private:
       return false;
     }
     while (!at(Tok::kRBrace) && !at(Tok::kEnd)) {
+      std::vector<std::string> lead;
+      drainComments(lead, nullptr, 0);
       NodePtr child = parseNode();
       if (child == nullptr) {
         sync();
         continue;
+      }
+      child->lead = std::move(lead);
+      const int closeLine = lex_.line();
+      if (child->kind != Node::kIf && child->trail.empty()) {
+        child->trail = takeTrail(closeLine);
       }
       arm.body.push_back(std::move(child));
     }
@@ -859,6 +962,8 @@ private:
   bool hasLa_ = false;
   std::string_view file_;
   std::vector<Diag> &diags_;
+  std::vector<std::string> pendingLead_; // module-level, drained by run()
+  std::vector<LexComment> commentQ_;     // pumped from the lexer
 };
 
 // ---- dump ---------------------------------------------------------------

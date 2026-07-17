@@ -2,7 +2,8 @@
 // .ui files: hosts convert foreign markup into the AST, transform it,
 // and print here; it is also the syntax-migration tool (parse old,
 // print new). parse(print(m)) must reproduce m exactly (the round-trip
-// test pins it) — comments are not part of the AST and do not survive.
+// test pins it) — comment TRIVIA included: lead comments print before
+// their construct, trails on its open line, bodyTails before its close.
 #include "uic/uic.hpp"
 
 #include <sstream>
@@ -119,6 +120,7 @@ class Printer {
     }
     gap();
     for (const ConstDecl &c : m.consts) {
+      printLead(c.lead);
       line(constText(c));
     }
     gap();
@@ -146,6 +148,9 @@ class Printer {
       printNode(*n);
       gap();
     }
+    if (!m.tail.empty()) {
+      printLead(m.tail);
+    }
     return std::move(out_).str();
   }
 
@@ -153,6 +158,17 @@ class Printer {
   void line(const std::string &s) {
     out_ << std::string(static_cast<size_t>(indent_) * 4, ' ') << s << '\n';
     blank_ = false;
+  }
+  void printLead(const std::vector<std::string> &lead) {
+    for (const std::string &c : lead) {
+      line(c.empty() ? "//" : "// " + c);
+    }
+  }
+  static std::string withTrail(std::string open, const std::string &trail) {
+    if (!trail.empty()) {
+      open += " // " + trail;
+    }
+    return open;
   }
   // one blank line between top-level declarations (never two)
   void gap() {
@@ -216,9 +232,11 @@ class Printer {
   }
 
   void printStyle(const StyleDecl &s) {
-    line("style " + s.name + " {");
+    printLead(s.lead);
+    line(withTrail("style " + s.name + " {", s.trail));
     ++indent_;
     printAttrs(s.attrs);
+    printLead(s.bodyTail);
     --indent_;
     line("}");
   }
@@ -240,9 +258,11 @@ class Printer {
   }
 
   void printTemplate(const TemplateDecl &t) {
-    line("template " + t.name + " {");
+    printLead(t.lead);
+    line(withTrail("template " + t.name + " {", t.trail));
     ++indent_;
     for (const InParam &p : t.ins) {
+      printLead(p.lead);
       std::string d = "in " + p.name + ": " + p.type;
       if (p.hasDefault) {
         d += " = " + p.defaultValue;
@@ -252,15 +272,24 @@ class Printer {
     for (const NodePtr &n : t.body) {
       printNode(*n);
     }
+    printLead(t.bodyTail);
     --indent_;
     line("}");
   }
 
   // attrs pack onto lines while they fit (the committed trees stay
-  // readable); binds/actions/children always break
+  // readable); binds/actions/children always break, and an attr with
+  // lead comments starts its own line
   void printAttrs(const std::vector<Attr> &attrs) {
     std::string cur;
     for (const Attr &a : attrs) {
+      if (!a.lead.empty()) {
+        if (!cur.empty()) {
+          line(cur);
+          cur.clear();
+        }
+        printLead(a.lead);
+      }
       const std::string one = a.name + ": " + a.value + ";";
       if (cur.empty()) {
         cur = one;
@@ -279,6 +308,7 @@ class Printer {
   }
 
   void printNode(const Node &n) {
+    printLead(n.lead);
     if (n.kind == Node::kIf) {
       for (size_t i = 0; i < n.arms.size(); ++i) {
         const IfArm &arm = n.arms[i];
@@ -299,32 +329,44 @@ class Printer {
     }
     const std::string open =
         n.kind == Node::kWidgetState ? "widgetstate " + n.tag : n.tag;
-    // compact form for leaf nodes with few attrs (instances read as
-    // one line, like the source XML)
+    // compact form for trivia-free leaf nodes with few attrs (instances
+    // read as one line, like the source XML)
+    const bool hasAttrLead = [&] {
+      for (const Attr &a : n.attrs) {
+        if (!a.lead.empty()) {
+          return true;
+        }
+      }
+      return false;
+    }();
     if (n.children.empty() && n.binds.empty() && n.actions.empty() &&
-        n.arms.empty() && n.attrs.size() <= 3) {
+        n.arms.empty() && n.attrs.size() <= 3 && n.bodyTail.empty() &&
+        !hasAttrLead) {
       std::string one = open + " {";
       for (const Attr &a : n.attrs) {
         one += " " + a.name + ": " + a.value + ";";
       }
       one += " }";
       if (one.size() + static_cast<size_t>(indent_) * 4 <= 76) {
-        line(one);
+        line(withTrail(one, n.trail));
         return;
       }
     }
-    line(open + " {");
+    line(withTrail(open + " {", n.trail));
     ++indent_;
     printAttrs(n.attrs);
     for (const Bind &b : n.binds) {
+      printLead(b.lead);
       line("bind " + b.target + ": " + exprText(*b.expr) + ";");
     }
     for (const Action &a : n.actions) {
+      printLead(a.lead);
       line("action " + a.event + ": " + exprText(*a.expr) + ";");
     }
     for (const NodePtr &c : n.children) {
       printNode(*c);
     }
+    printLead(n.bodyTail);
     --indent_;
     line("}");
   }

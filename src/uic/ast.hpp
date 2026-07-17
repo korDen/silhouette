@@ -33,22 +33,31 @@ struct Expr {
   int line = 0;
 };
 
+// Comments are TRIVIA carried on the AST (`lead` = own-line comments
+// before the construct, `trail` = the end-of-line comment on its open
+// line, `bodyTail` = comments before its closing brace) — the printer
+// is the one writer of .ui files, so provenance and `// was:` records
+// must survive a parse-print cycle.
+
 // A plain attribute: value verbatim to ';' (the porting surface).
 struct Attr {
   std::string name;
   std::string value;
+  std::vector<std::string> lead;
   int line = 0;
 };
 
 struct Bind {
   std::string target; // the attribute this expression drives
   ExprPtr expr;
+  std::vector<std::string> lead;
   int line = 0;
 };
 
 struct Action {
   std::string event; // click, rightclick, ...
   ExprPtr expr;      // host call expression
+  std::vector<std::string> lead;
   int line = 0;
 };
 
@@ -74,6 +83,9 @@ struct Node {
   std::vector<Action> actions;
   std::vector<NodePtr> children;
   std::vector<IfArm> arms;
+  std::vector<std::string> lead;
+  std::string trail;
+  std::vector<std::string> bodyTail;
   int line = 0;
 };
 
@@ -82,6 +94,7 @@ struct InParam {
   std::string type;
   std::string defaultValue; // verbatim; empty + !hasDefault = required
   bool hasDefault = false;
+  std::vector<std::string> lead;
   int line = 0;
 };
 
@@ -89,6 +102,9 @@ struct TemplateDecl {
   std::string name;
   std::vector<InParam> ins;
   std::vector<NodePtr> body;
+  std::vector<std::string> lead;
+  std::string trail;
+  std::vector<std::string> bodyTail;
   int line = 0;
 };
 
@@ -122,6 +138,9 @@ struct EnumDecl {
 struct StyleDecl {
   std::string name;
   std::vector<Attr> attrs;
+  std::vector<std::string> lead;
+  std::string trail;
+  std::vector<std::string> bodyTail;
   int line = 0;
 };
 
@@ -131,6 +150,7 @@ struct ConstDecl {
   std::string rawValue;  // set when the value is a plain literal
   std::string initType;  // set when the value is `Type { fields }`
   std::vector<Attr> initFields;
+  std::vector<std::string> lead;
   int line = 0;
 };
 
@@ -165,6 +185,7 @@ struct Module {
   std::vector<FnDecl> fns;
   std::vector<TemplateDecl> templates;
   std::vector<NodePtr> roots; // top-level widget trees
+  std::vector<std::string> tail; // comments after the last declaration
 };
 
 } // namespace uic

@@ -363,6 +363,27 @@ TEST(UicEmit, FitxLabelsMeasureInTheSolve) {
   EXPECT_NE(h.find("tx0 = x1; ty0 = y1; tw0 = w1;"), std::string::npos);
 }
 
+TEST(UicEmit, NumbersRenderIntoRunsWithoutInterpolation) {
+  // the LANGUAGE has no string interpolation; num()/fixed() are the
+  // compiler's typed conversions at a text sink, and their buffer is a
+  // local value the run borrows (no allocation — the cost contract)
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h;\n"
+      "    label { bind content: num(snapshot.player.score); font: dyn_9; }\n"
+      "    label { bind content: fixed(snapshot.unit.hpRegen, 1);\n"
+      "            font: dyn_9; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("const auto src1 = gen_detail::num((long long)(s.player.score))"),
+            std::string::npos);
+  EXPECT_NE(h.find("gen_detail::fixed((double)(s.unit.hpRegen), (int)(1))"),
+            std::string::npos);
+  EXPECT_NE(h.find("sink.text(pen1, gen_detail::sv(src1),"),
+            std::string::npos);
+}
+
 TEST(UicEmit, OutlinedLabelsPreferTheStroker) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

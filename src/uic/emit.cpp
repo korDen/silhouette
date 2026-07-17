@@ -333,7 +333,24 @@ struct Emit {
         return "gen_detail::fracf((float)(" + expr(*e.args[1]) +
                "), (float)(" + expr(*e.args[2]) + "))";
       }
-      err(e.line, "call in bind (subset builtin: fracf)");
+      // the typed conversions at a text sink (no interpolation in the
+      // language — these are calls, and their result IS a run)
+      if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "num") {
+        if (e.args.size() != 2) {
+          err(e.line, "num takes (value)");
+          return "0";
+        }
+        return "gen_detail::num((long long)(" + expr(*e.args[1]) + "))";
+      }
+      if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "fixed") {
+        if (e.args.size() != 3) {
+          err(e.line, "fixed takes (value, decimals)");
+          return "0";
+        }
+        return "gen_detail::fixed((double)(" + expr(*e.args[1]) + "), (int)(" +
+               expr(*e.args[2]) + "))";
+      }
+      err(e.line, "call in bind (subset builtins: fracf, num, fixed)");
       return "0";
     case Expr::kUnary:
       return "(" + e.text + expr(*e.args[0]) + ")";
@@ -819,14 +836,21 @@ struct Emit {
   // a label's text: the `content` attr, or a bound expression (a
   // snapshot value formatted by the host). Both are borrowed for the
   // duration of the sink call (the Sink's string-lifetime contract).
-  std::string textExpr(const SolvedW &sw) {
+  // the run's SOURCE value (a bound snapshot field, a formatted
+  // number, or a literal) — the caller keeps it in a local and takes
+  // views of it, per the Sink's string-lifetime contract
+  std::string textSource(const SolvedW &sw) {
     if (auto b = sw.binds.find("content"); b != sw.binds.end()) {
-      // a bound run comes from the snapshot: adapt whatever it is
-      // (a schema char array, a view) to one borrowed run
-      return "gen_detail::sv(" + b->second + ")";
+      return b->second;
     }
     const std::string *c = get(sw.attrs, "content");
-    return c == nullptr ? std::string("\"\"") : quotedLit(*c);
+    return c == nullptr ? std::string("std::string_view()")
+                        : "std::string_view(" + quotedLit(*c) + ")";
+  }
+
+  // the same, as ONE borrowed run (for the solve's fitx measure)
+  std::string textExpr(const SolvedW &sw) {
+    return "gen_detail::sv(" + textSource(sw) + ")";
   }
 
   // attr values arrive verbatim, so a TEXT value already wears its
@@ -908,8 +932,11 @@ struct Emit {
                  const std::string &h) {
     const std::map<std::string, std::string> &bag = sw.attrs;
     const std::string font = fontOf(sw);
-    const std::string text = textExpr(sw);
     const std::string sfx = std::to_string(sw.idx);
+    // the run's SOURCE is a local: a formatted number lives in its
+    // buffer, and every borrow below points into that live value
+    drawLine("const auto src" + sfx + " = " + textSource(sw) + ";");
+    const std::string text = "gen_detail::sv(src" + sfx + ")";
     const std::string tw = "tw" + sfx, lh = "lh" + sfx;
     drawLine("const float " + tw + " = sink.measure(" + font + ", " + text +
              ");");
@@ -1332,6 +1359,7 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "#include <cmath>\n"
      << "#include <cstddef>\n"
      << "#include <cstdint>\n"
+     << "#include <cstdio>\n"
      << "#include <string_view>\n\n"
      << "namespace " << opt.ns << " {\n"
      << "namespace gen_detail {\n"
@@ -1349,6 +1377,30 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "  return std::string_view(a.data(), n);\n"
      << "}\n"
      << "inline std::string_view sv(std::string_view s) { return s; }\n"
+     << "// A number rendered into a text run. The LANGUAGE has no string\n"
+     << "// interpolation; these are the compiler's typed conversions at\n"
+     << "// a text sink — num(v) and fixed(v, decimals). The buffer is a\n"
+     << "// value with automatic storage: no allocation, and the run is\n"
+     << "// borrowed from a live local exactly like every other run.\n"
+     << "struct TextBuf {\n"
+     << "  char b[24];\n"
+     << "  int n = 0;\n"
+     << "};\n"
+     << "inline std::string_view sv(const TextBuf &t) {\n"
+     << "  return std::string_view(t.b, (size_t)t.n);\n"
+     << "}\n"
+     << "inline TextBuf num(long long v) {\n"
+     << "  TextBuf t;\n"
+     << "  t.n = std::snprintf(t.b, sizeof t.b, \"%lld\", v);\n"
+     << "  if (t.n < 0) { t.n = 0; }\n"
+     << "  return t;\n"
+     << "}\n"
+     << "inline TextBuf fixed(double v, int decimals) {\n"
+     << "  TextBuf t;\n"
+     << "  t.n = std::snprintf(t.b, sizeof t.b, \"%.*f\", decimals, v);\n"
+     << "  if (t.n < 0) { t.n = 0; }\n"
+     << "  return t;\n"
+     << "}\n"
      << "} // namespace gen_detail\n\n";
   if (opt.rectLog) {
     os << "// the rect gate's hook: absolute rect per widget, document "

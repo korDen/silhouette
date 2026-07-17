@@ -1439,6 +1439,36 @@ struct Emit {
            ftos(c[2]) + ", " + ftos(c[3]) + "}";
   }
 
+  // the sink flags a widget's rendermode/tiling imply — the blend/grayscale
+  // bits (rendermode="overlay"|"additive"|"grayscale") plus U/V tiling.
+  // uscale/hflip stay UV-side, so they are not here.
+  std::string renderFlags(const std::map<std::string, std::string> &bag) {
+    std::vector<std::string> fs;
+    if (const std::string *rm = get(bag, "rendermode")) {
+      if (*rm == "additive") {
+        fs.push_back("ui::kBlendAdditive");
+      } else if (*rm == "overlay") {
+        fs.push_back("ui::kBlendOverlay");
+      } else if (*rm == "grayscale") {
+        fs.push_back("ui::kGrayscale");
+      }
+    }
+    if (const std::string *u = get(bag, "utile"); u != nullptr && *u == "1") {
+      fs.push_back("ui::kTileU");
+    }
+    if (const std::string *v = get(bag, "vtile"); v != nullptr && *v == "1") {
+      fs.push_back("ui::kTileV");
+    }
+    if (fs.empty()) {
+      return "0";
+    }
+    std::string out = fs[0];
+    for (size_t i = 1; i < fs.size(); ++i) {
+      out += " | " + fs[i];
+    }
+    return out;
+  }
+
   void emitDraw(const SolvedW &sw, const std::string &ax,
                 const std::string &ay, const std::string &w,
                 const std::string &h) {
@@ -1500,6 +1530,7 @@ struct Emit {
       } kPieces[9] = {{"_tl", 0, 0}, {"_t", 1, 0},  {"_tr", 2, 0},
                       {"_l", 0, 1},  {"_c", 1, 1},  {"_r", 2, 1},
                       {"_bl", 0, 2}, {"_b", 1, 2},  {"_br", 2, 2}};
+      const std::string fflags = renderFlags(bag);
       drawLine("{");
       ++drawIndent;
       drawLine("const float bt = std::min(" + btE + ", std::min(" + w +
@@ -1517,7 +1548,7 @@ struct Emit {
                  (p.gx == 1 ? "cwm" : "bt") + ", " +
                  (p.gy == 1 ? "chm" : "bt") + "}, " +
                  texIdExpr(piece, n.line) + ", {0, 0, 1, 1}, " + col +
-                 ", 0, 0, ui::kNoClip);");
+                 ", " + fflags + ", 0, ui::kNoClip);");
       }
       --drawIndent;
       drawLine("}");
@@ -1551,7 +1582,7 @@ struct Emit {
         idExpr = texIdExpr(path, n.line);
       }
       std::string uv = "{0, 0, 1, 1}";
-      std::string flags = "0";
+      const std::string flags = renderFlags(bag);
       if (const std::string *us = get(bag, "uscale")) {
         const float span = 1.f / std::strtof(us->c_str(), nullptr);
         uv = "{0, 0, " + ftos(span) + ", 1}";
@@ -1559,10 +1590,6 @@ struct Emit {
       if (const std::string *hf = get(bag, "hflip");
           hf != nullptr && *hf == "1") {
         uv = "{1, 0, -1, 1}";
-      }
-      if (const std::string *ut = get(bag, "utile");
-          ut != nullptr && *ut == "1") {
-        flags = "ui::kTileU";
       }
       drawLine("sink.image(" + dst + ", " + idExpr + ", " + uv + ", " +
                colorLiteral(sw, 1) + ", " + flags + ", " +
@@ -1574,12 +1601,14 @@ struct Emit {
       const float def = tex != nullptr && *tex == "$black" ? 0.0f : 1.0f;
       const std::string col = colorLiteral(sw, def);
       const std::string mask = maskOf(bag, n.line);
+      const std::string flags = renderFlags(bag);
       if (mask != "0") {
-        drawLine("sink.image(" + dst + ", 0, {0, 0, 1, 1}, " + col + ", 0, " +
-                 mask + ", ui::kNoClip);");
+        drawLine("sink.image(" + dst + ", 0, {0, 0, 1, 1}, " + col + ", " +
+                 flags + ", " + mask + ", ui::kNoClip);");
         return;
       }
-      drawLine("sink.quad(" + dst + ", " + col + ", 0, ui::kNoClip);");
+      drawLine("sink.quad(" + dst + ", " + col + ", " + flags +
+               ", ui::kNoClip);");
     }
   }
 

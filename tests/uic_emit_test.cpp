@@ -40,6 +40,23 @@ TEST(UicEmit, TheUscaleInversionLaw) {
   EXPECT_NE(h.find("{0, 0, 2.85714293f, 1}"), std::string::npos);
 }
 
+TEST(UicEmit, RenderModeBecomesABlendFlag) {
+  // rendermode overlay/additive/grayscale -> the sink blend/grayscale flags.
+  // A frame carries the flag on every 9-slice piece; an image on its draw.
+  // Without it a tinted overlay renders as a flat fill, not a composite.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 10h; height: 3h;\n"
+      "    frame { texture: /art/hl.img; rendermode: overlay;\n"
+      "            borderthickness: 0.2h; }\n"
+      "    image { texture: /art/i.img; rendermode: additive; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("ui::kBlendOverlay"), std::string::npos); // the frame
+  EXPECT_NE(h.find("ui::kBlendAdditive"), std::string::npos); // the image
+}
+
 TEST(UicEmit, AlignAndDeltaSizes) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

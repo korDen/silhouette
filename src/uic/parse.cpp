@@ -537,7 +537,21 @@ private:
           sync();
           continue;
         }
-        p.type = std::string(ty.text);
+        // `in x: a | b | c` — an inline enum (a closed value set); the
+        // first ident is the first value, and `|` chains the rest
+        if (at(Tok::kPipe)) {
+          p.enumValues.push_back(std::string(ty.text));
+          while (eat(Tok::kPipe)) {
+            const Token v = expectIdent("enum value");
+            if (v.kind != Tok::kIdent) {
+              sync();
+              break;
+            }
+            p.enumValues.push_back(std::string(v.text));
+          }
+        } else {
+          p.type = std::string(ty.text);
+        }
         if (eat(Tok::kEq)) {
           p.defaultValue = raw();
           p.hasDefault = true;
@@ -697,7 +711,35 @@ private:
       a.name = std::string(head.text);
       a.line = head.line;
       a.lead = std::move(lead);
-      a.value = raw();
+      // `attr: match scrutinee { value: result; ... }` — the value is
+      // chosen by an enum param instead of being a single literal.
+      // Probing for `match` fills the lookahead, which raw() requires
+      // empty, so undo the probe on the plain-value path.
+      const State beforeValue = save();
+      if (atIdent("match")) {
+        take();
+        const Token sc = expectIdent("match scrutinee");
+        if (sc.kind != Tok::kIdent || !expect(Tok::kLBrace, "'{'")) {
+          sync();
+          continue;
+        }
+        a.matchOn = std::string(sc.text);
+        while (!at(Tok::kRBrace) && !at(Tok::kEnd)) {
+          const Token v = expectIdent("match value");
+          if (v.kind != Tok::kIdent || !expect(Tok::kColon, "':'")) {
+            sync();
+            continue;
+          }
+          MatchArm arm;
+          arm.value = std::string(v.text);
+          arm.result = raw();
+          a.arms.push_back(std::move(arm));
+        }
+        expect(Tok::kRBrace, "'}'");
+      } else {
+        restore(beforeValue); // the probe read a token; give it back
+        a.value = raw();
+      }
       n.attrs.push_back(std::move(a));
     }
     const bool ok = expect(Tok::kRBrace, "'}'");
@@ -1046,7 +1088,15 @@ void dumpNode(const Node &n, int depth, std::ostream &os) {
   os << pad << (n.kind == Node::kWidgetState ? "widgetstate " : "widget ")
      << n.tag << '\n';
   for (const Attr &a : n.attrs) {
-    os << pad << "  attr " << a.name << "=`" << a.value << "`\n";
+    if (a.isMatch()) {
+      os << pad << "  attr " << a.name << " match " << a.matchOn << " {";
+      for (const MatchArm &arm : a.arms) {
+        os << ' ' << arm.value << "=`" << arm.result << "`;";
+      }
+      os << " }\n";
+    } else {
+      os << pad << "  attr " << a.name << "=`" << a.value << "`\n";
+    }
   }
   for (const Bind &b : n.binds) {
     os << pad << "  bind " << b.target << "= ";
@@ -1144,7 +1194,14 @@ std::string dumpModule(const Module &m) {
   for (const TemplateDecl &t : m.templates) {
     os << "template " << t.name << '\n';
     for (const InParam &p : t.ins) {
-      os << "  in " << p.name << ": " << p.type;
+      os << "  in " << p.name << ": ";
+      if (p.isEnum()) {
+        for (size_t i = 0; i < p.enumValues.size(); ++i) {
+          os << (i ? " | " : "") << p.enumValues[i];
+        }
+      } else {
+        os << p.type;
+      }
       if (p.hasDefault) {
         os << " = `" << p.defaultValue << "`";
       }

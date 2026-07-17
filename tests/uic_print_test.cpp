@@ -35,11 +35,18 @@ fn half(v: num) -> num = v / 2;
 template chip {
     in slot: num;
     in label: str = "hi";
+    in shape: round | square | wide = round;
     panel {
         width: 7h; height: 100%;
         bind visible: snapshot.slots[slot].exists && slot != 3;
         action click: game.Poke(slot);
-        image { texture: /art/icon.img; }
+        image {
+            texture: match shape {
+                round: /art/round.img;
+                square: /art/square.img;
+                wide: /art/wide.img;
+            }
+        }
         widgetstate hover {
             color: 1 1 1 1;
         }

@@ -439,9 +439,40 @@ struct Emit {
     return v;
   }
 
+
+  // Resolve `attr: match p { v: path; ... }` — the language's answer to
+  // interpolated assets. EVERY arm's asset is statically validated (a
+  // missing file is a hard error), and the scrutinee's
+  // folded value picks the one arm this instantiation draws.
+  std::string resolveMatch(const Attr &a) {
+    for (const MatchArm &arm : a.arms) {
+      if (!assetExists(arm.result)) {
+        err(a.line, "match '" + a.name + "' arm '" + arm.value +
+                        "': missing asset " + arm.result);
+      }
+    }
+    const std::string picked = substitute(a.matchOn);
+    if (picked == a.matchOn) {
+      err(a.line, "match scrutinee '" + a.matchOn +
+                      "' does not fold to a value here");
+      return "";
+    }
+    for (const MatchArm &arm : a.arms) {
+      if (arm.value == picked) {
+        return arm.result;
+      }
+    }
+    err(a.line, "match '" + a.name + "' has no arm for '" + picked + "'");
+    return "";
+  }
+
   std::map<std::string, std::string> bagOf(const Node &n) {
     std::map<std::string, std::string> bag;
     for (const Attr &a : n.attrs) {
+      if (a.isMatch()) {
+        bag.emplace(a.name, resolveMatch(a));
+        continue;
+      }
       bag.emplace(a.name, a.value);
     }
     auto styleIt = bag.find("style");
@@ -481,6 +512,17 @@ struct Emit {
     if (!envStack.empty()) {
       for (auto &kv : bag) {
         kv.second = substitute(kv.second);
+      }
+    }
+    // an interpolation hole must NEVER reach the compiler: a converter's
+    // asset-match pass turns every {param} asset into a match over an
+    // enum-typed param, statically validated. A surviving hole is a
+    // hard error (the pass missed one).
+    for (auto &kv : bag) {
+      if ((kv.first == "texture" || kv.first == "alphamaskfile") &&
+          kv.second.find('{') != std::string::npos) {
+        err(n.line, "interpolation hole in asset '" + kv.second +
+                        "' — must be a match over an enum param");
       }
     }
     return bag;
@@ -685,17 +727,35 @@ struct Emit {
                            Diag::Severity::kWarning});
           continue;
         }
-        // the args are TYPED: the value's form (or the referenced outer
-        // param's declared type) must match the declaration
-        const std::string cls = valueType(a.value);
-        if (!typeCompatible(param->type, cls)) {
-          err(a.line, "arg '" + a.name + "' of '" + t.name + "' is " +
-                          param->type + ", got " +
-                          (cls.empty() ? "nothing" : cls) + " '" + a.value +
-                          "'");
-        }
         // arg values may reference the OUTER instantiation's params
-        env[a.name] = substitute(a.value);
+        const std::string folded = substitute(a.value);
+        if (param->isEnum()) {
+          // an enum param: the arg must fold to one of its values (a
+          // literal here, or a forward that resolves to one)
+          bool ok = false;
+          for (const std::string &v : param->enumValues) {
+            ok = ok || folded == v;
+          }
+          if (!ok) {
+            std::string vals;
+            for (const std::string &v : param->enumValues) {
+              vals += (vals.empty() ? "" : " | ") + v;
+            }
+            err(a.line, "arg '" + a.name + "' of '" + t.name + "' is '" +
+                            folded + "', not one of: " + vals);
+          }
+        } else {
+          // the args are TYPED: the value's form (or the referenced
+          // outer param's declared type) must match the declaration
+          const std::string cls = valueType(a.value);
+          if (!typeCompatible(param->type, cls)) {
+            err(a.line, "arg '" + a.name + "' of '" + t.name + "' is " +
+                            param->type + ", got " +
+                            (cls.empty() ? "nothing" : cls) + " '" +
+                            a.value + "'");
+          }
+        }
+        env[a.name] = folded;
       }
       for (const InParam &p : t.ins) {
         if (env.find(p.name) == env.end()) {
@@ -1240,7 +1300,37 @@ struct Emit {
     if (n.tag == "frame") {
       const std::string *tex = get(bag, "texture");
       if (tex == nullptr) {
-        skip(n.line, "textureless frame");
+        // a textureless frame is a plain border: bordercolor drawn as
+        // four edge quads of borderthickness
+        if (get(bag, "bordercolor") == nullptr) {
+          skip(n.line, "textureless frame with no border");
+          return;
+        }
+        const std::string *bt = get(bag, "borderthickness");
+        const std::string bthE =
+            "R(" +
+            dimExpr(bt != nullptr ? parseDim(*bt) : parseDim("1"), false, w,
+                    h, false) +
+            ")";
+        float bc[4] = {0, 0, 0, 1};
+        if (const std::string *v = get(bag, "bordercolor")) {
+          parseColor(*v, bc);
+        }
+        const std::string bcol = "ui::Color{" + ftos(bc[0]) + ", " +
+                                 ftos(bc[1]) + ", " + ftos(bc[2]) + ", " +
+                                 ftos(bc[3]) + "}";
+        const std::string bth = "bth" + std::to_string(sw.idx);
+        drawLine("const float " + bth + " = " + bthE + ";");
+        drawLine("sink.quad({" + ax + ", " + ay + ", " + w + ", " + bth +
+                 "}, " + bcol + ", 0, ui::kNoClip);"); // top
+        drawLine("sink.quad({" + ax + ", " + ay + " + " + h + " - " + bth +
+                 ", " + w + ", " + bth + "}, " + bcol +
+                 ", 0, ui::kNoClip);"); // bottom
+        drawLine("sink.quad({" + ax + ", " + ay + ", " + bth + ", " + h +
+                 "}, " + bcol + ", 0, ui::kNoClip);"); // left
+        drawLine("sink.quad({" + ax + " + " + w + " - " + bth + ", " + ay +
+                 ", " + bth + ", " + h + "}, " + bcol +
+                 ", 0, ui::kNoClip);"); // right
         return;
       }
       const std::string *bt = get(bag, "borderthickness");

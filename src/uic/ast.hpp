@@ -39,12 +39,24 @@ struct Expr {
 // is the one writer of .ui files, so provenance and `// was:` records
 // must survive a parse-print cycle.
 
-// A plain attribute: value verbatim to ';' (the porting surface).
+// A match arm: one enum value -> the asset path for it.
+struct MatchArm {
+  std::string value;  // an enum value of the scrutinee param
+  std::string result; // the (asset) value for that case
+};
+
+// A plain attribute: value verbatim to ';' (the porting surface). When
+// `matchOn` is set, the value is chosen by a MATCH over an enum param —
+// the language's answer to interpolated assets: each arm's path is
+// concrete and statically validated (uic), no `{param}` hole survives.
 struct Attr {
   std::string name;
   std::string value;
+  std::string matchOn; // the scrutinee param ("" = a plain value)
+  std::vector<MatchArm> arms;
   std::vector<std::string> lead;
   int line = 0;
+  bool isMatch() const { return !matchOn.empty(); }
 };
 
 struct Bind {
@@ -91,11 +103,13 @@ struct Node {
 
 struct InParam {
   std::string name;
-  std::string type;
+  std::string type;         // a named type, or "" when enumValues is set
+  std::vector<std::string> enumValues; // inline enum: `in x: a | b | c`
   std::string defaultValue; // verbatim; empty + !hasDefault = required
   bool hasDefault = false;
   std::vector<std::string> lead;
   int line = 0;
+  bool isEnum() const { return !enumValues.empty(); }
 };
 
 struct TemplateDecl {

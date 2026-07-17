@@ -342,7 +342,11 @@ TEST(UicEmit, LabelsDrawRunsAndTheManifestNamesTheirFonts) {
   EXPECT_NE(h.find("std::ceil((w1 - tw1) / 2)"), std::string::npos);
   EXPECT_NE(h.find("std::ceil((h1 - lh1) / 2)"), std::string::npos);
   EXPECT_NE(h.find("+ sink.ascent("), std::string::npos);
-  EXPECT_NE(h.find("sink.text(pen1, \"1998\","), std::string::npos);
+  // a static content binds to a src view exactly like num()/fmt() — one
+  // measure-and-draw path, no literal threaded through the sink call
+  EXPECT_NE(h.find("src1 = std::string_view(\"1998\")"), std::string::npos);
+  EXPECT_NE(h.find("sink.text(pen1, gen_detail::sv(src1),"),
+            std::string::npos);
 }
 
 TEST(UicEmit, FitxLabelsMeasureInTheSolve) {
@@ -426,6 +430,71 @@ TEST(UicEmit, AnUnfontedUncoloredLabelIsGray) {
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   EXPECT_NE(h.find("\"system_medium\"},"), std::string::npos); // the default
   EXPECT_NE(h.find("ui::Color{0.5f, 0.5f, 0.5f, 1.0f}"), std::string::npos);
+}
+
+TEST(UicEmit, MatchOverAnEnumPicksAndValidatesEachArm) {
+  // the interpolated-asset answer: an enum param + a match with every
+  // path concrete. Each instantiation's folded value picks one arm; the
+  // arg is checked against the enum. (Existence needs --assets; here we
+  // pin the selection + the enum arg check.)
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template slot { in shape: round | square;\n"
+      "    image { texture: match shape {\n"
+      "        round: /art/round_frame.tga;\n"
+      "        square: /art/square_frame.tga;\n"
+      "    } } }\n"
+      "panel { slot { shape: round; } slot { shape: square; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("/art/round_frame.tga"), std::string::npos);
+  EXPECT_NE(h.find("/art/square_frame.tga"), std::string::npos);
+  EXPECT_EQ(h.find("match"), std::string::npos); // resolved, not emitted
+}
+
+TEST(UicEmit, AnEnumArgOutsideItsSetIsLoud) {
+  std::vector<uic::Diag> diags;
+  emit("template slot { in shape: round | square;\n"
+       "    image { texture: match shape { round: /a.tga; square: /b.tga; } } }\n"
+       "panel { slot { shape: hexagon; } }\n",
+       &diags);
+  ASSERT_FALSE(diags.empty());
+  EXPECT_TRUE(uic::hasErrors(diags));
+  EXPECT_NE(diags[0].msg.find("not one of: round | square"),
+            std::string::npos);
+}
+
+TEST(UicEmit, AnInterpolationHoleInAnAssetIsAHardError) {
+  // holes must never reach the compiler — a converter's asset-match pass
+  // turns each into a match over an enum param first
+  std::vector<uic::Diag> diags;
+  emit("template slot { in shape: ident;\n"
+       "    image { texture: /art/{shape}_up.tga; } }\n"
+       "panel { slot { shape: round; } }\n",
+       &diags);
+  ASSERT_FALSE(diags.empty());
+  EXPECT_TRUE(uic::hasErrors(diags));
+  EXPECT_NE(diags[0].msg.find("interpolation hole in asset"),
+            std::string::npos);
+}
+
+TEST(UicEmit, ATexturelessFrameDrawsItsBorder) {
+  // a frame with no texture but a bordercolor is a plain outline: four
+  // edge quads of borderthickness
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 20h; height: 20h;\n"
+      "    frame { color: invisible; borderthickness: 1;\n"
+      "            bordercolor: 0 0 0 1; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_EQ(h.find("SKIP"), std::string::npos); // not skipped
+  // top edge, then bottom/left/right — all in the border colour
+  EXPECT_NE(h.find("sink.quad({ax1, ay1, w1, bth1}, "
+                   "ui::Color{0.0f, 0.0f, 0.0f, 1.0f}"),
+            std::string::npos);
+  EXPECT_NE(h.find("ay1 + h1 - bth1"), std::string::npos); // bottom
+  EXPECT_NE(h.find("ax1 + w1 - bth1"), std::string::npos); // right
 }
 
 TEST(UicEmit, AlphaMasksCutTheirWidgetToShape) {

@@ -62,6 +62,7 @@ enum class Tok {
   kNe,
   kAndAnd,
   kOrOr,
+  kPipe, // single '|' — the inline-enum separator
   kEq,
   kArrow,
   kError,
@@ -227,7 +228,7 @@ private:
       two('&', Tok::kAndAnd, Tok::kError);
       break;
     case '|':
-      two('|', Tok::kOrOr, Tok::kError);
+      two('|', Tok::kOrOr, Tok::kPipe);
       break;
     default:
       t.kind = Tok::kError;

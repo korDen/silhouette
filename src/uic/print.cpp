@@ -263,7 +263,14 @@ class Printer {
     ++indent_;
     for (const InParam &p : t.ins) {
       printLead(p.lead);
-      std::string d = "in " + p.name + ": " + p.type;
+      std::string d = "in " + p.name + ": ";
+      if (p.isEnum()) {
+        for (size_t i = 0; i < p.enumValues.size(); ++i) {
+          d += (i ? " | " : "") + p.enumValues[i];
+        }
+      } else {
+        d += p.type;
+      }
       if (p.hasDefault) {
         d += " = " + p.defaultValue;
       }
@@ -283,12 +290,23 @@ class Printer {
   void printAttrs(const std::vector<Attr> &attrs) {
     std::string cur;
     for (const Attr &a : attrs) {
-      if (!a.lead.empty()) {
+      if (!a.lead.empty() || a.isMatch()) {
         if (!cur.empty()) {
           line(cur);
           cur.clear();
         }
         printLead(a.lead);
+      }
+      // a match attribute is a block: attr: match p { v: r; ... }
+      if (a.isMatch()) {
+        line(a.name + ": match " + a.matchOn + " {");
+        ++indent_;
+        for (const MatchArm &arm : a.arms) {
+          line(arm.value + ": " + arm.result + ";");
+        }
+        --indent_;
+        line("}");
+        continue;
       }
       const std::string one = a.name + ": " + a.value + ";";
       if (cur.empty()) {
@@ -330,10 +348,12 @@ class Printer {
     const std::string open =
         n.kind == Node::kWidgetState ? "widgetstate " + n.tag : n.tag;
     // compact form for trivia-free leaf nodes with few attrs (instances
-    // read as one line, like the source XML)
-    const bool hasAttrLead = [&] {
+    // read as one line, like the source XML). An attr with a lead
+    // comment, or a match (a block with no single value), forces the
+    // multi-line body.
+    const bool attrForcesBody = [&] {
       for (const Attr &a : n.attrs) {
-        if (!a.lead.empty()) {
+        if (!a.lead.empty() || a.isMatch()) {
           return true;
         }
       }
@@ -341,7 +361,7 @@ class Printer {
     }();
     if (n.children.empty() && n.binds.empty() && n.actions.empty() &&
         n.arms.empty() && n.attrs.size() <= 3 && n.bodyTail.empty() &&
-        !hasAttrLead) {
+        !attrForcesBody) {
       std::string one = open + " {";
       for (const Attr &a : n.attrs) {
         one += " " + a.name + ": " + a.value + ";";

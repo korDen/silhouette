@@ -102,14 +102,14 @@ TEST(UicEmit, OutsideTheSubsetDegradesLoudly) {
   // of the module still compiles and renders (never a hard stop)
   std::vector<uic::Diag> diags;
   const std::string h = emit(
-      "panel { button { color: white; } image { texture: /art/a.img; } }\n",
+      "panel { listbox { color: white; } image { texture: /art/a.img; } }\n",
       &diags);
   ASSERT_FALSE(diags.empty());
   EXPECT_EQ(diags[0].severity, uic::Diag::Severity::kWarning);
   EXPECT_FALSE(uic::hasErrors(diags));
   EXPECT_NE(diags[0].msg.find("skipped (unsupported yet)"),
             std::string::npos);
-  EXPECT_NE(h.find("// SKIP(unsupported): widget 'button'"),
+  EXPECT_NE(h.find("// SKIP(unsupported): widget 'listbox'"),
             std::string::npos);
   EXPECT_NE(h.find("/art/a.img"), std::string::npos); // the rest emitted
 }
@@ -127,19 +127,29 @@ TEST(UicEmit, VisibleZeroGatesDrawsNotLayout) {
   EXPECT_NE(h.find("w1 = "), std::string::npos); // still solved
 }
 
-TEST(UicEmit, FloatChainThreadsACursor) {
+TEST(UicEmit, FloatChainFollowsTheTargetRect) {
+  // the position law: a chain child's
+  // main axis advances from the previous TARGET's far edge; the cross
+  // axis reads the target's rect; the chain's first child positions
+  // plainly; and a child with ANY explicit x/y opts OUT of the chain
+  // while still becoming the next target
   std::vector<uic::Diag> diags;
   const std::string h = emit(
       "panel { width: 40h; height: 4h; float: right; padding: .5h;\n"
       "    image { texture: /art/a.img; width: 2h; }\n"
       "    image { texture: /art/b.img; width: 3h; }\n"
+      "    image { texture: /art/c.img; width: 3h; x: 0; }\n"
       "}\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  EXPECT_NE(h.find("cur0 = 0;"), std::string::npos);
-  EXPECT_NE(h.find("x1 = cur0 + R(0.0f);"), std::string::npos);
-  EXPECT_NE(h.find("cur0 = x1 + w1 + R("), std::string::npos);
-  EXPECT_NE(h.find("x2 = cur0 + R(0.0f);"), std::string::npos);
+  EXPECT_NE(h.find("hasT0 = 0;"), std::string::npos);
+  EXPECT_NE(h.find("x1 = R(tx0 + tw0 + R("), std::string::npos); // chain
+  EXPECT_NE(h.find("y1 = std::floor(ty0);"), std::string::npos); // cross
+  EXPECT_NE(h.find("tx0 = x1; ty0 = y1; tw0 = w1; th0 = h1; hasT0 = 1;"),
+            std::string::npos);
+  // the x: 0 child does NOT chain (no tx0-based x3) but IS a target
+  EXPECT_EQ(h.find("x3 = R(tx0"), std::string::npos);
+  EXPECT_NE(h.find("tx0 = x3;"), std::string::npos);
 }
 
 TEST(UicEmit, GrowUnionsInAPassLoop) {
@@ -307,12 +317,52 @@ TEST(UicEmit, StructuralIfLowersToAbsenceGuards) {
   // is the negation of arm 1
   EXPECT_NE(h.find("pass0 == 0 && (s.stash.open)"), std::string::npos);
   EXPECT_NE(h.find("pass0 == 0 && (!(s.stash.open))"), std::string::npos);
-  EXPECT_NE(h.find("if (s.stash.open) { cur0 = x1 + w1"),
-            std::string::npos);
-  EXPECT_NE(h.find("if (!(s.stash.open)) { cur0 = x2 + w2"),
+  EXPECT_NE(h.find("if (s.stash.open) { tx0 = x1;"), std::string::npos);
+  EXPECT_NE(h.find("if (!(s.stash.open)) { tx0 = x2;"),
             std::string::npos);
   EXPECT_NE(h.find("if (s.stash.open) {\n"), std::string::npos); // draw gate
   EXPECT_EQ(h.find("SKIP"), std::string::npos); // nothing degraded
+}
+
+TEST(UicEmit, ButtonsRenderTheirRestingState) {
+  // buttons are containers; only the 'up' widgetstate renders in the
+  // static build, and states never union, chain, or become targets
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h;\n"
+      "    button { grow: 1; float: right;\n"
+      "        widgetstate up {\n"
+      "            image { texture: /art/up.img; width: 2h; height: 2h; }\n"
+      "        }\n"
+      "        widgetstate over {\n"
+      "            image { texture: /art/over.img; width: 2h; height: 2h; }\n"
+      "        }\n"
+      "        panel { width: 3h; height: 2h; color: 1 1 1; }\n"
+      "    }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("/art/up.img"), std::string::npos);
+  EXPECT_EQ(h.find("/art/over.img"), std::string::npos);
+  // the state layer (idx 2) neither unions nor targets; the plain
+  // panel child does both
+  EXPECT_EQ(h.find("nx2"), std::string::npos);
+  EXPECT_EQ(h.find("tx1 = x2;"), std::string::npos);
+  EXPECT_NE(h.find("tx1 = x4;"), std::string::npos);
+}
+
+TEST(UicEmit, EmptyAlignFoldsToLeft) {
+  // a param-fed align with no argument folds to the empty string —
+  // the default is LEFT, never right
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template t { in a: ident;\n"
+      "    panel { width: 2h; height: 2h; align: a; color: 1 1 1; } }\n"
+      "panel { width: 40h; height: 4h; t { } }\n",
+      &diags);
+  EXPECT_FALSE(uic::hasErrors(diags));
+  EXPECT_NE(h.find("x1 = 0.0f + R(0.0f);"), std::string::npos);
+  EXPECT_EQ(h.find("w0 - w1"), std::string::npos); // not right-aligned
 }
 
 TEST(UicEmit, HiddenChildOccupancyLaws) {
@@ -327,11 +377,11 @@ TEST(UicEmit, HiddenChildOccupancyLaws) {
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   // growinvis=0: neither hidden child unions
-  EXPECT_EQ(h.find("std::max(w0"), std::string::npos);
-  // stickytoinvis default 1: the first child still advances the chain;
-  // the second (stickytoinvis: 0) does not
-  EXPECT_NE(h.find("cur0 = x1 + w1"), std::string::npos);
-  EXPECT_EQ(h.find("cur0 = x2 + w2"), std::string::npos);
+  EXPECT_EQ(h.find("std::max(hix0"), std::string::npos);
+  // stickytoinvis default 1: the first child still becomes the chain
+  // target; the second (stickytoinvis: 0) does not
+  EXPECT_NE(h.find("tx0 = x1;"), std::string::npos);
+  EXPECT_EQ(h.find("tx0 = x2;"), std::string::npos);
 }
 
 } // namespace

@@ -183,6 +183,17 @@ struct SolvedW {
   std::string guard;
   std::vector<SolvedW *> kids;
   bool reverse = false;
+  // a widgetstate layer: excluded from unions and float chains
+  bool isState = false;
+};
+
+// the enclosing float chain, threaded to children: axis, the parent's
+// variable suffix (target rect tx/ty/tw/th + hasT live on the parent),
+// and the parent's padding expression
+struct ChainCtx {
+  char axis = 0;
+  std::string sfx;
+  std::string spacing;
 };
 
 struct Emit {
@@ -529,7 +540,7 @@ struct Emit {
   // (each participating in the chain/union individually).
   void solveInto(std::vector<SolvedW *> &out, const Node &n,
                  const std::string &pw, const std::string &ph,
-                 const std::string &cursor, const char mainAxis) {
+                 const ChainCtx &chain) {
     if (n.kind == Node::kIf) {
       // structural if — per-arm occupancy gating: arm N lowers to the
       // guard cond_N && !cond_0 && ... && !cond_(N-1) (the else arm =
@@ -550,7 +561,7 @@ struct Emit {
         }
         for (const NodePtr &b : arm.body) {
           const size_t before = out.size();
-          solveInto(out, *b, pw, ph, cursor, mainAxis);
+          solveInto(out, *b, pw, ph, chain);
           for (size_t k = before; k < out.size(); ++k) {
             SolvedW &cw = *out[k];
             cw.guard = cw.guard.empty()
@@ -565,11 +576,16 @@ struct Emit {
       }
       return;
     }
-    if (n.kind != Node::kWidget) {
-      skip(n.line, "widgetstate");
-      return;
+    // a widgetstate is a state LAYER: only the resting state ('up')
+    // renders in the static build; states are excluded from unions and
+    // float chains
+    const bool isState = n.kind == Node::kWidgetState;
+    if (isState && n.tag != "up") {
+      return; // the other states await interaction (silent by design)
     }
-    if (n.tag != "panel" && n.tag != "image" && n.tag != "frame") {
+    if (!isState &&
+        n.tag != "panel" && n.tag != "image" && n.tag != "frame" &&
+        n.tag != "button") {
       auto tpl = templates.find(n.tag);
       if (tpl == templates.end()) {
         skip(n.line, "widget '" + n.tag + "'");
@@ -629,7 +645,7 @@ struct Emit {
       declStack.push_back(&t);
       ++instanceDepth;
       for (const NodePtr &b : t.body) {
-        solveInto(out, *b, pw, ph, cursor, mainAxis);
+        solveInto(out, *b, pw, ph, chain);
       }
       --instanceDepth;
       declStack.pop_back();
@@ -642,6 +658,7 @@ struct Emit {
     sw.node = &n;
     sw.attrs = bagOf(n);
     sw.idx = nextVar++;
+    sw.isState = isState;
     sw.reverse = flag(sw.attrs, "reverse", false);
     // transpile binds NOW — the instantiation's param environment is
     // gone by draw time
@@ -700,39 +717,75 @@ struct Emit {
     // ---- children (before position: a grown size feeds the align)
     solveChildren(sw, vw, vh, grows);
 
-    // ---- position
+    // ---- position (the spec's position laws)
+    const std::string *xAttr = get(sw.attrs, "x");
+    const std::string *yAttr = get(sw.attrs, "y");
     std::string xOff = "0.0f", yOff = "0.0f";
-    if (const std::string *x = get(sw.attrs, "x")) {
-      xOff = dimExpr(parseDim(*x), true, pw, ph, false);
+    if (xAttr != nullptr) {
+      xOff = dimExpr(parseDim(*xAttr), true, pw, ph, false);
     }
-    if (const std::string *y = get(sw.attrs, "y")) {
-      yOff = dimExpr(parseDim(*y), false, pw, ph, false);
+    if (yAttr != nullptr) {
+      yOff = dimExpr(parseDim(*yAttr), false, pw, ph, false);
     }
     const std::string *al = get(sw.attrs, "align");
     const std::string *val = get(sw.attrs, "valign");
     auto alignBase = [&](const std::string *a, const std::string &pdim,
                          const std::string &cdim) -> std::string {
-      if (a == nullptr || *a == "left" || *a == "top") {
-        return "0.0f";
-      }
-      if (*a == "center") {
+      if (a != nullptr && *a == "center") {
         return "R((" + pdim + " - " + cdim + ") / 2)";
       }
-      return pdim + " - " + cdim; // right/bottom (unrounded base)
+      if (a != nullptr && (*a == "right" || *a == "bottom")) {
+        return pdim + " - " + cdim; // unrounded base (right/bottom never rounds)
+      }
+      return "0.0f"; // left/top and everything else (empty folds here)
     };
-    if (mainAxis == 'x') {
-      solveLine(vx + " = " + cursor + " + R(" + xOff + ");");
-      solveLine(vy + " = " + alignBase(val, ph, vh) + " + R(" + yOff +
-                ");");
-    } else if (mainAxis == 'y') {
-      solveLine(vy + " = " + cursor + " + R(" + yOff + ");");
+    auto plainPosition = [&] {
       solveLine(vx + " = " + alignBase(al, pw, vw) + " + R(" + xOff +
                 ");");
+      solveLine(vy + " = " + alignBase(val, ph, vh) + " + R(" + yOff +
+                ");");
+    };
+    // the chain law: a child with ANY explicit x or y opts OUT of the
+    // float chain (baseX/baseY empty is the eligibility test); states
+    // never chain. Chain children take the main axis from the previous
+    // target's far edge and the CROSS axis from the target's rect.
+    const bool chains = chain.axis != 0 && xAttr == nullptr &&
+                        yAttr == nullptr && !isState;
+    if (chains) {
+      const std::string &ps = chain.sfx;
+      const std::string tx = "tx" + ps, ty = "ty" + ps, tw = "tw" + ps,
+                        th = "th" + ps;
+      solveLine("if (hasT" + ps + " != 0) {");
+      ++solveIndent;
+      auto crossAdj = [&](const std::string *a, const std::string &tdim,
+                          const std::string &cdim) -> std::string {
+        if (a != nullptr && *a == "center") {
+          return " + R((" + tdim + " - " + cdim + ") / 2)";
+        }
+        if (a != nullptr && (*a == "right" || *a == "bottom")) {
+          return " + (" + tdim + " - " + cdim + ")"; // unrounded
+        }
+        return "";
+      };
+      if (chain.axis == 'x') {
+        solveLine(vx + " = R(" + tx + " + " + tw + " + " + chain.spacing +
+                  ");");
+        solveLine(vy + " = std::floor(" + ty + ")" + crossAdj(val, th, vh) +
+                  ";");
+      } else {
+        solveLine(vy + " = R(" + ty + " + " + th + " + " + chain.spacing +
+                  ");");
+        solveLine(vx + " = std::floor(" + tx + ")" + crossAdj(al, tw, vw) +
+                  ";");
+      }
+      --solveIndent;
+      solveLine("} else {");
+      ++solveIndent;
+      plainPosition(); // the chain's first child positions plainly
+      --solveIndent;
+      solveLine("}");
     } else {
-      solveLine(vx + " = " + alignBase(al, pw, vw) + " + R(" + xOff +
-                ");");
-      solveLine(vy + " = " + alignBase(val, ph, vh) + " + R(" + yOff +
-                ");");
+      plainPosition();
     }
   }
 
@@ -767,15 +820,23 @@ struct Emit {
                 sfx + " = 0; hix" + sfx + " = " + vw + "; hiy" + sfx +
                 " = " + vh + "; }");
     }
-    std::string cursor;
+    ChainCtx chain;
     if (mainAxis != 0) {
-      cursor = "cur" + sfx;
-      decl << "  float " << cursor << " = 0;\n";
-      solveLine(cursor + " = 0;");
+      chain.axis = mainAxis;
+      chain.sfx = sfx;
+      chain.spacing = spacing;
+      // the float TARGET rect: each surviving child becomes the next
+      // target — main axis advances from its
+      // far edge, the cross axis reads its position and size
+      decl << "  float tx" << sfx << " = 0, ty" << sfx << " = 0, tw"
+           << sfx << " = 0, th" << sfx << " = 0; int hasT" << sfx
+           << " = 0;\n";
+      solveLine("tx" + sfx + " = 0; ty" + sfx + " = 0; tw" + sfx +
+                " = 0; th" + sfx + " = 0; hasT" + sfx + " = 0;");
     }
     for (const NodePtr &c : n.children) {
       const size_t before = sw.kids.size();
-      solveInto(sw.kids, *c, vw, vh, cursor, mainAxis);
+      solveInto(sw.kids, *c, vw, vh, chain);
       for (size_t k = before; k < sw.kids.size(); ++k) {
         const SolvedW &cw = *sw.kids[k];
         const std::string cs = std::to_string(cw.idx);
@@ -788,9 +849,10 @@ struct Emit {
         const auto bv = cw.binds.find("visible");
         const std::string dynVis =
             bv != cw.binds.end() ? bv->second : std::string();
-        const bool counts = !hidden || growinvis;
-        const bool advances = !hidden || flag(cw.attrs, "stickytoinvis",
-                                              true);
+        const bool counts = (!hidden || growinvis) && !cw.isState;
+        const bool advances =
+            (!hidden || flag(cw.attrs, "stickytoinvis", true)) &&
+            !cw.isState;
         if (grows && counts) {
           std::string cond = "pass" + sfx + " == 0";
           if (!dynVis.empty() && !growinvis) {
@@ -817,9 +879,10 @@ struct Emit {
                     "; }");
         }
         if (mainAxis != 0 && advances) {
-          const std::string cend = mainAxis == 'x'
-                                       ? "x" + cs + " + w" + cs
-                                       : "y" + cs + " + h" + cs;
+          const std::string update = "tx" + sfx + " = x" + cs + "; ty" +
+                                     sfx + " = y" + cs + "; tw" + sfx +
+                                     " = w" + cs + "; th" + sfx + " = h" +
+                                     cs + "; hasT" + sfx + " = 1;";
           std::string gate;
           if (!dynVis.empty() && !flag(cw.attrs, "stickytoinvis", true)) {
             gate = dynVis;
@@ -830,10 +893,9 @@ struct Emit {
                                 : "(" + cw.guard + ") && (" + gate + ")";
           }
           if (!gate.empty()) {
-            solveLine("if (" + gate + ") { " + cursor + " = " + cend +
-                      " + " + spacing + "; }");
+            solveLine("if (" + gate + ") { " + update + " }");
           } else {
-            solveLine(cursor + " = " + cend + " + " + spacing + ";");
+            solveLine(update);
           }
         }
       }
@@ -1041,7 +1103,7 @@ struct Emit {
     }
     std::vector<SolvedW *> roots;
     for (const NodePtr &n : m.roots) { // screen = the parent
-      solveInto(roots, *n, "W", "H", "", 0);
+      solveInto(roots, *n, "W", "H", ChainCtx{});
     }
     for (const SolvedW *r : roots) {
       drawNode(*r, "0.0f", "0.0f");

@@ -592,6 +592,27 @@ TEST(UicEmit, ATextTernaryCoercesEachBranchToAView) {
             std::string::npos);
 }
 
+TEST(UicEmit, AnEmptyOffsetStaysInTheFloatChain) {
+  // a child chains iff its x AND y offsets are EMPTY, not merely absent. A
+  // template that threads `y: y` from an unset no-default param folds y to ""
+  // — an empty VALUE, not an absent attr — so it MUST still chain off its
+  // sibling, not fall back to plain positioning.
+  std::vector<uic::Diag> diags;
+  const std::string h =
+      emit("template row { in y: dim;\n"
+           "    panel { y: y; height: 1h; image { texture: /art/x.tga; } } }\n"
+           "panel { float: bottom;\n"
+           "    panel { height: 1h; image { texture: /art/a.tga; } }\n"
+           "    row { }\n"
+           "}\n",
+           &diags);
+  // no ERROR (an unset no-default param only warns), and the second child —
+  // the row's empty-y panel — takes the chain target (= R(ty..)), which only
+  // a chained child does.
+  EXPECT_FALSE(uic::hasErrors(diags));
+  EXPECT_NE(h.find("= R(ty"), std::string::npos);
+}
+
 TEST(UicEmit, ComparingTwoDifferentEnumSetsIsLoud) {
   // both sides are uint32_t at runtime, but the .ui type-check rejects
   // comparing an {x,y} id to a {p,q} id (kept type-checked by design)

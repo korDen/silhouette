@@ -1137,8 +1137,14 @@ struct Emit {
     // float chain (baseX/baseY empty is the eligibility test); states
     // never chain. Chain children take the main axis from the previous
     // target's far edge and the CROSS axis from the target's rect.
-    const bool chains = chain.axis != 0 && xAttr == nullptr &&
-                        yAttr == nullptr && !isState;
+    // a child chains iff its x AND y offsets are EMPTY. Emptiness is the
+    // offset's parse being empty — an absent attr AND an empty-string one
+    // both qualify; a set offset like "0h" does not. A template threading
+    // `y: y` from an unset no-default param folds y to "", so testing the
+    // attr's PRESENCE would wrongly opt it out; test the VALUE's emptiness.
+    const bool chains = chain.axis != 0 &&
+                        (xAttr == nullptr || xAttr->empty()) &&
+                        (yAttr == nullptr || yAttr->empty()) && !isState;
     if (chains) {
       const std::string &ps = chain.sfx;
       const std::string tx = "tx" + ps, ty = "ty" + ps, tw = "tw" + ps,

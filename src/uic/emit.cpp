@@ -960,7 +960,40 @@ struct Emit {
           env[p.name] = p.defaultValue;
         }
       }
+      // a `style` arg is resolved before the params are filled, not passed
+      // through: the named style's props merge into the args, the instance's
+      // own args winning (the same style expansion widgets get). So a
+      // color-carrying style supplies the template's color param.
+      std::vector<Attr> args;
+      std::string styleList;
       for (const Attr &a : n.attrs) {
+        if (a.name == "style") {
+          styleList = substitute(a.value);
+        } else {
+          args.push_back(a);
+        }
+      }
+      if (!styleList.empty()) {
+        std::map<std::string, std::string> styleBag;
+        std::set<std::string> seen;
+        for (const std::string &name : styleNames(styleList)) {
+          mergeStyle(styleBag, name, seen, n.line);
+        }
+        for (const auto &kv : styleBag) {
+          bool present = kv.first == "style";
+          for (const Attr &a : args) {
+            present = present || a.name == kv.first;
+          }
+          if (!present) {
+            Attr sa;
+            sa.name = kv.first;
+            sa.value = kv.second;
+            sa.line = n.line;
+            args.push_back(std::move(sa));
+          }
+        }
+      }
+      for (const Attr &a : args) {
         const InParam *param = nullptr;
         for (const InParam &p : t.ins) {
           if (p.name == a.name) {

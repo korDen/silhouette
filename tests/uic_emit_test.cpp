@@ -613,6 +613,25 @@ TEST(UicEmit, AnEmptyOffsetStaysInTheFloatChain) {
   EXPECT_NE(h.find("= R(ty"), std::string::npos);
 }
 
+TEST(UicEmit, AStyleOnAnInstanceFillsAParamFromItsProps) {
+  // a `style` arg on a template instance is resolved, not passed through: the
+  // named style's props merge into the instance's args (the instance's own
+  // args winning), the same expansion widgets get. So a color-carrying style
+  // supplies the template's color param — the child paints that color, not
+  // the white default.
+  std::vector<uic::Diag> diags;
+  const std::string h =
+      emit("style tinted { color: rgb(0.98, 0.85, 0.72); }\n"
+           "template chip { in color: color = white;\n"
+           "    image { texture: /art/x.tga; color: color; } }\n"
+           "panel { chip { style: tinted; } }\n",
+           &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("0.980000019f"), std::string::npos); // the style's red
+  EXPECT_EQ(h.find("ui::Color{1.0f, 1.0f, 1.0f, 1.0f}"),
+            std::string::npos); // not the white default
+}
+
 TEST(UicEmit, ComparingTwoDifferentEnumSetsIsLoud) {
   // both sides are uint32_t at runtime, but the .ui type-check rejects
   // comparing an {x,y} id to a {p,q} id (kept type-checked by design)

@@ -209,6 +209,29 @@ TEST(UicEmit, StylesMergeWidgetWins) {
   EXPECT_NE(h.find("for (int pass0"), std::string::npos);
 }
 
+TEST(UicEmit, StylesResolveTheirInheritanceChain) {
+  // a style with its own `style:` base inherits the base's attrs: the
+  // derived style overrides what it names (font), the rest flows through
+  // (shadow). Without following the chain, a text_label_small label loses
+  // text_base's shadow.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "style base_s { font: bigfont; shadow: 1; shadowcolor: rgb(0, 0, 0); }\n"
+      "style small_s { style: base_s; font: smallfont; }\n"
+      "panel { label { style: small_s; content: \"-\"; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("smallfont"), std::string::npos); // derived font wins
+  // the base's shadow flowed through: emitLabel draws a shadow pass under
+  // the run, so there are two sink.text( calls, not one
+  size_t n = 0, p = 0;
+  while ((p = h.find("sink.text(", p)) != std::string::npos) {
+    ++n;
+    p += 9;
+  }
+  EXPECT_GE(n, 2u) << "shadow pass missing — base style not inherited";
+}
+
 TEST(UicEmit, TemplatesInstantiateWithFoldedParams) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

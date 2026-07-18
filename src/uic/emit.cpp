@@ -614,6 +614,59 @@ struct Emit {
     return v;
   }
 
+  // a comma-separated style list, each name trimmed
+  static std::vector<std::string> styleNames(const std::string &s) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i <= s.size()) {
+      const size_t comma = std::min(s.find(',', i), s.size());
+      std::string name = s.substr(i, comma - i);
+      while (!name.empty() && name.front() == ' ') {
+        name.erase(name.begin());
+      }
+      while (!name.empty() && name.back() == ' ') {
+        name.pop_back();
+      }
+      if (!name.empty()) {
+        out.push_back(name);
+      }
+      if (comma == s.size()) {
+        break;
+      }
+      i = comma + 1;
+    }
+    return out;
+  }
+
+  // merge one style's attrs into `bag` (first-writer-wins), then resolve
+  // its OWN `style:` base(s) AFTER — so a derived style overrides its base
+  // (its own attrs win; the base's other attrs flow through). `seen` guards
+  // cycles and diamonds.
+  void mergeStyle(std::map<std::string, std::string> &bag,
+                  const std::string &name, std::set<std::string> &seen,
+                  int line) {
+    if (!seen.insert(name).second) {
+      return;
+    }
+    auto it = styles.find(name);
+    if (it == styles.end()) {
+      diags.push_back({m.name, line, 0, "unknown style '" + name + "'",
+                       Diag::Severity::kWarning});
+      return;
+    }
+    std::string base;
+    for (const Attr &a : it->second->attrs) {
+      if (a.name == "style") {
+        base = a.value; // resolved after this style's own attrs
+        continue;
+      }
+      bag.emplace(a.name, a.value);
+    }
+    for (const std::string &b : styleNames(base)) {
+      mergeStyle(bag, b, seen, line);
+    }
+  }
+
 
   // Resolve `attr: match p { v: path; ... }` — the language's answer to
   // interpolated values. The scrutinee's folded value picks the one arm
@@ -656,36 +709,14 @@ struct Emit {
     }
     auto styleIt = bag.find("style");
     if (styleIt != bag.end()) {
-      // left-to-right, widget wins (first insertion wins the bag). The NAME may
-      // be a template param (a caller choosing this instance's look),
-      // so it folds before the lookup.
+      // left-to-right, widget wins (first writer wins). The NAME may be a
+      // template param (a caller choosing this instance's look), so it
+      // folds before the lookup. Each style resolves its own `style:` base
+      // chain (mergeStyle), so inherited attrs flow through.
       const std::string s = substitute(styleIt->second);
-      size_t i = 0;
-      while (i <= s.size()) {
-        const size_t comma = std::min(s.find(',', i), s.size());
-        std::string name = s.substr(i, comma - i);
-        while (!name.empty() && name.front() == ' ') {
-          name.erase(name.begin());
-        }
-        while (!name.empty() && name.back() == ' ') {
-          name.pop_back();
-        }
-        auto it = styles.find(name);
-        if (it == styles.end()) {
-          if (!name.empty()) {
-            diags.push_back({m.name, n.line, 0,
-                             "unknown style '" + name + "'",
-                             Diag::Severity::kWarning});
-          }
-        } else {
-          for (const Attr &a : it->second->attrs) {
-            bag.emplace(a.name, a.value);
-          }
-        }
-        if (comma == s.size()) {
-          break;
-        }
-        i = comma + 1;
+      std::set<std::string> seen;
+      for (const std::string &name : styleNames(s)) {
+        mergeStyle(bag, name, seen, n.line);
       }
     }
     if (!envStack.empty()) {

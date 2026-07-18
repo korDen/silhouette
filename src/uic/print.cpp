@@ -101,7 +101,10 @@ void printExpr(std::ostream &os, const Expr &e, int parentPrec) {
     printExpr(os, *e.args[2], 0);
     break;
   case Expr::kMatch:
-    os << e.text << " = match ";
+    if (!e.text.empty()) {
+      os << e.text << " = "; // the render conversion, if any
+    }
+    os << "match ";
     printExpr(os, *e.args[0], 0); // scrutinee
     os << " { ";
     for (size_t i = 0; i < e.cases.size(); ++i) {

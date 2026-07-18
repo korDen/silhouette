@@ -539,6 +539,23 @@ TEST(UicEmit, AMatchInABindLowersToAConvertedTernary) {
   EXPECT_EQ(h.find("A == C"), std::string::npos); // the else has no compare
 }
 
+TEST(UicEmit, AMatchOverANumberNeedsNoConversion) {
+  // match works over a plain (non-enum) scrutinee: its values are literals
+  // compared as written, and with no conversion the arms ARE the result (a
+  // texture id here) — the else-chain a multi-branch bind would otherwise be.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template slot { in kind: num;\n"
+      "    image { bind texture: match kind {\n"
+      "        0: /art/a.img, 1: /art/b.img, 2: /art/c.img }; } }\n"
+      "panel { slot { kind: 1; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("(1) == 0"), std::string::npos);       // kind folds to 1
+  EXPECT_NE(h.find("(1) == 1"), std::string::npos);       // compared as written
+  EXPECT_EQ(h.find("gen_detail::num"), std::string::npos); // no conversion
+}
+
 TEST(UicEmit, AnInlineEnumComparisonLowersToNamedIds) {
   // an inline-enum param and a bare value both become the schema's UPPER
   // id constant in a bind — a uint32_t compare that folds at compile time

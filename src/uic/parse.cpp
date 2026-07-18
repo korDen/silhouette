@@ -848,19 +848,29 @@ private:
 
   // ---- expressions ------------------------------------------------------------
 
-  // `<conv> = match <scrutinee> { VALUE: <expr>, ... }` — a readable
-  // multi-way bind value (nicer than a ternary chain when >2 cases). The
-  // last arm is the else. Returns null (restoring) when the value is not
-  // this form, so the caller falls back to a plain expression.
+  // `match <scrutinee> { VALUE: <expr>, ... }` or `<conv> = match ...` — a
+  // readable multi-way bind value (nicer than a ternary chain past two
+  // cases). The scrutinee is an inline-enum param (values are its members)
+  // or any value (values are literals, e.g. numbers); the last arm is the
+  // else; the optional conv (num/ord) renders the picked result. Returns
+  // null (restoring) when the value is not a match, so the caller falls
+  // back to a plain expression.
   ExprPtr parseMatchBind() {
     const State start = save();
-    if (!at(Tok::kIdent)) {
-      return nullptr;
-    }
-    const Token conv = take();
-    if (!eat(Tok::kEq) || !atIdent("match")) {
-      restore(start);
-      return nullptr;
+    std::string conv;
+    int line = peek().line;
+    if (!atIdent("match")) {
+      // `<conv> = match ...` — a leading ident then '='
+      if (!at(Tok::kIdent)) {
+        return nullptr;
+      }
+      const Token c = take();
+      if (!eat(Tok::kEq) || !atIdent("match")) {
+        restore(start);
+        return nullptr;
+      }
+      conv = std::string(c.text);
+      line = c.line;
     }
     take(); // 'match'
     const Token sc = expectIdent("match scrutinee");
@@ -869,16 +879,23 @@ private:
     }
     auto m = std::make_unique<Expr>();
     m->kind = Expr::kMatch;
-    m->text = std::string(conv.text); // the render conversion (num/ord)
-    m->line = conv.line;
+    m->text = conv; // "" = no render conversion (the arms are the value)
+    m->line = line;
     auto scr = std::make_unique<Expr>();
     scr->kind = Expr::kIdent;
     scr->text = std::string(sc.text);
     scr->line = sc.line;
     m->args.push_back(std::move(scr)); // args[0] = scrutinee
     while (!at(Tok::kRBrace) && !at(Tok::kEnd)) {
-      const Token v = expectIdent("match value");
-      if (v.kind != Tok::kIdent || !expect(Tok::kColon, "':'")) {
+      // an arm value is an enum member (ident) or a literal (number)
+      const Token v = peek();
+      if (v.kind != Tok::kIdent && v.kind != Tok::kNumber) {
+        error(v, "expected a match value (an enum member or a number)");
+        sync();
+        break;
+      }
+      take(); // the value
+      if (!expect(Tok::kColon, "':'")) {
         sync();
         break;
       }

@@ -22,6 +22,7 @@
 #include "uic/uic.hpp"
 
 #include <cctype>
+#include <functional>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -99,6 +100,48 @@ Dim parseDim(const std::string &s) {
     d.kind = Dim::kBad;
   }
   return d;
+}
+
+// True when a size value is a lone dim in the classic grammar (optional
+// sign, number, optional %/@/h/w unit) or an empty/degenerate substitution
+// — anything that is NOT a multi-term arithmetic or reference expression.
+// parseDim (with the delta law) handles the former; sizeCppExpr the latter.
+bool isLoneDim(std::string_view v) {
+  size_t i = 0;
+  const size_t n = v.size();
+  auto spaces = [&]() {
+    while (i < n && v[i] == ' ') {
+      ++i;
+    }
+  };
+  spaces();
+  if (i == n) {
+    return true; // empty / all-whitespace: a degenerate dim, warned as before
+  }
+  // A leading reference (width/height/parent...) or a parenthesis is an
+  // expression, never a lone dim.
+  if (std::isalpha((unsigned char)v[i]) != 0 || v[i] == '(') {
+    return false;
+  }
+  // Otherwise a number leads: optional sign, digits, optional %/@/h/w unit.
+  if (v[i] == '+' || v[i] == '-') {
+    ++i;
+  }
+  while (i < n && (std::isdigit((unsigned char)v[i]) != 0 || v[i] == '.')) {
+    ++i;
+  }
+  while (i < n && (v[i] == '%' || v[i] == '@' || v[i] == 'h' || v[i] == 'w')) {
+    ++i;
+  }
+  spaces();
+  // A binary operator or a parenthesis AFTER the dim means an expression;
+  // trailing junk (a bad unit like '-2p') stays a lone dim — parseDim warns
+  // on it exactly as it always did, rather than failing the emit.
+  if (i < n && (v[i] == '+' || v[i] == '-' || v[i] == '*' || v[i] == '/' ||
+                v[i] == '(')) {
+    return false;
+  }
+  return true;
 }
 
 std::string ftos(float v) {
@@ -253,6 +296,10 @@ struct Emit {
   std::deque<SolvedW> arena;
   std::vector<std::map<std::string, std::string>> envStack;
   std::vector<const TemplateDecl *> declStack; // enclosing param types
+  // the resolved width/height VARS of the current ancestor chain (a widget's
+  // parent is the top), so a size can name an ancestor's dimension:
+  // parent.width / parent.parent.height — the ancestor-dimension idiom
+  std::vector<std::string> wStack, hStack;
   int instanceDepth = 0;
   int nextVar = 0;
   int solveIndent = 1, drawIndent = 1;
@@ -636,6 +683,122 @@ struct Emit {
       return (horizontal ? pw : ph) + " + (" + raw + ")";
     }
     return raw;
+  }
+
+  // A size VALUE parsed as an ARITHMETIC EXPRESSION (+ - * /, parens) over
+  // dims (7h, 66%, 42), the widget's OWN dimensions (width, height), and its
+  // ANCESTORS' (parent.width, parent.parent.height, ...). Returns the
+  // unrounded float C++ expression. Sets readsW/readsH when the expression
+  // reads the widget's own width/height — that dimension must be solved first.
+  // A reference the tree has no ancestor for, or an unknown token, is a
+  // diagnostic (never silently zero).
+  std::string sizeCppExpr(std::string_view s, bool horizontal,
+                          const std::string &vw, const std::string &vh,
+                          const std::string &pw, const std::string &ph,
+                          int line, bool &readsW, bool &readsH) {
+    size_t p = 0;
+    auto skip = [&]() {
+      while (p < s.size() && s[p] == ' ') {
+        ++p;
+      }
+    };
+    std::function<std::string()> expr, term, factor;
+    factor = [&]() -> std::string {
+      skip();
+      if (p < s.size() && s[p] == '(') {
+        ++p;
+        std::string inner = expr();
+        skip();
+        if (p < s.size() && s[p] == ')') {
+          ++p;
+        } else {
+          err(line, "size expression: unbalanced '('");
+        }
+        return "(" + inner + ")";
+      }
+      // a dimension reference: (parent.)* (width|height)
+      if (p < s.size() && std::isalpha((unsigned char)s[p]) != 0) {
+        const size_t start = p;
+        while (p < s.size() &&
+               (std::isalnum((unsigned char)s[p]) != 0 || s[p] == '.')) {
+          ++p;
+        }
+        const std::string full(s.substr(start, p - start));
+        std::string_view tok(full);
+        int levels = 0;
+        while (tok.substr(0, 7) == "parent.") {
+          tok.remove_prefix(7);
+          ++levels;
+        }
+        const bool isW = tok == "width";
+        if (!isW && tok != "height") {
+          err(line, "size expression: unknown reference '" + full + "'");
+          return "0.0f";
+        }
+        if (levels == 0) {
+          if (isW) {
+            readsW = true;
+          } else {
+            readsH = true;
+          }
+          return "(float)" + (isW ? vw : vh);
+        }
+        if (levels == 1) {
+          return "(float)" + (isW ? pw : ph);
+        }
+        const std::vector<std::string> &stk = isW ? wStack : hStack;
+        if (stk.size() < (size_t)levels) {
+          err(line, "size expression: '" + full + "' has no such ancestor");
+          return "0.0f";
+        }
+        return "(float)" + stk[stk.size() - (size_t)levels];
+      }
+      // a dim literal: optional sign, number, optional unit
+      const size_t start = p;
+      if (p < s.size() && (s[p] == '+' || s[p] == '-')) {
+        ++p;
+      }
+      while (p < s.size() &&
+             (std::isdigit((unsigned char)s[p]) != 0 || s[p] == '.')) {
+        ++p;
+      }
+      while (p < s.size() &&
+             (std::isalpha((unsigned char)s[p]) != 0 || s[p] == '%')) {
+        ++p;
+      }
+      const std::string lit(s.substr(start, p - start));
+      const Dim d = parseDim(lit);
+      if (d.kind == Dim::kBad) {
+        err(line, "size expression: bad dim '" + lit + "'");
+      }
+      return dimExpr(d, horizontal, pw, ph, false);
+    };
+    term = [&]() -> std::string {
+      std::string a = factor();
+      skip();
+      while (p < s.size() && (s[p] == '*' || s[p] == '/')) {
+        const char op = s[p++];
+        a = "(" + a + " " + op + " " + factor() + ")";
+        skip();
+      }
+      return a;
+    };
+    expr = [&]() -> std::string {
+      std::string a = term();
+      skip();
+      while (p < s.size() && (s[p] == '+' || s[p] == '-')) {
+        const char op = s[p++];
+        a = "(" + a + " " + op + " " + term() + ")";
+        skip();
+      }
+      return a;
+    };
+    std::string result = expr();
+    skip();
+    if (p != s.size()) {
+      err(line, "size expression: trailing '" + std::string(s.substr(p)) + "'");
+    }
+    return result;
   }
 
   // ---- the effective bag (style merge, widget wins; param subst) ---------
@@ -1092,39 +1255,60 @@ struct Emit {
                    : std::string()) +
               " :" + std::to_string(n.line));
 
-    // ---- size (annex: explicit floors the union on grow widgets;
-    // missing size = 100% of parent, or the union alone when growing)
-    auto sizeExpr = [&](const char *key, const char *sizeKey,
-                        bool horizontal) -> std::string {
+    // ---- size: an explicit width/height/size is an ARITHMETIC EXPRESSION
+    // over dims and self/ancestor dimensions (sizeCppExpr). A missing size is
+    // 100% of the parent, or the union alone when growing (the floor law).
+    bool wReadsW = false, wReadsH = false, hReadsW = false, hReadsH = false;
+    auto sizeExpr = [&](const char *key, const char *sizeKey, bool horizontal,
+                        bool &readsW, bool &readsH) -> std::string {
       const std::string *v = get(sw.attrs, key);
       if (v == nullptr) {
         v = get(sw.attrs, sizeKey);
       }
       if (v != nullptr) {
-        const Dim d = parseDim(*v);
-        if (d.kind == Dim::kBad) {
-          diags.push_back({m.name, n.line, 0,
-                           std::string("unsupported dim '") + *v +
-                               "' for " + key,
-                           Diag::Severity::kWarning});
+        // A lone dim (or an empty/degenerate substitution) keeps the classic
+        // grammar: parseDim + the delta law, WARNING (never failing) on a
+        // value it can't parse. Only a genuine arithmetic/reference
+        // expression — anything parseDim can't spell — routes to sizeCppExpr.
+        if (isLoneDim(*v)) {
+          const Dim d = parseDim(*v);
+          if (d.kind == Dim::kBad) {
+            diags.push_back({m.name, n.line, 0,
+                             std::string("unsupported dim '") + *v + "' for " +
+                                 key,
+                             Diag::Severity::kWarning});
+          }
+          return "R(" + dimExpr(d, horizontal, pw, ph, true) + ")";
         }
-        return "R(" + dimExpr(d, horizontal, pw, ph, true) + ")";
+        return "R(" + sizeCppExpr(*v, horizontal, vw, vh, pw, ph, n.line,
+                                  readsW, readsH) +
+               ")";
       }
       if (grows) {
         return "0.0f"; // union alone (the floor law)
       }
       return horizontal ? pw : ph; // default 100% of the parent
     };
-    std::string wE = sizeExpr("width", "size", true);
-    std::string hE = sizeExpr("height", "size", false);
+    std::string wE = sizeExpr("width", "size", true, wReadsW, wReadsH);
+    std::string hE = sizeExpr("height", "size", false, hReadsW, hReadsH);
     if (auto b = sw.binds.find("width"); b != sw.binds.end()) {
       wE = "R(" + pw + " * " + b->second + ")"; // interim fraction law
     }
     if (auto b = sw.binds.find("height"); b != sw.binds.end()) {
       hE = "R(" + ph + " * " + b->second + ")";
     }
-    solveLine(vw + " = " + wE + ";");
-    solveLine(vh + " = " + hE + ";");
+    // an expression reading the widget's OWN other dimension forces an order:
+    // solve that dimension first so the expression can read its variable.
+    if (wReadsH && hReadsW) {
+      err(n.line, "size: width and height reference each other");
+    }
+    if (wReadsH) {
+      solveLine(vh + " = " + hE + ";");
+      solveLine(vw + " = " + wE + ";");
+    } else {
+      solveLine(vw + " = " + wE + ";");
+      solveLine(vh + " = " + hE + ";");
+    }
     // the fitx solve law: a fitx label
     // sizes to clamp(textWidth, fitxmin, fitxmax) + fitxpadding, fity
     // to lineHeight + fitypadding — UNROUNDED, and re-run on every
@@ -1135,8 +1319,14 @@ struct Emit {
       emitLabelFit(sw, vw, vh, pw, ph);
     }
 
-    // ---- children (before position: a grown size feeds the align)
+    // ---- children (before position: a grown size feeds the align).
+    // This widget joins the ancestor chain while its subtree solves, so a
+    // descendant's size can name parent.width / parent.parent.height.
+    wStack.push_back(vw);
+    hStack.push_back(vh);
     solveChildren(sw, vw, vh, grows);
+    wStack.pop_back();
+    hStack.pop_back();
 
     // ---- position (the spec's position laws)
     const std::string *xAttr = get(sw.attrs, "x");

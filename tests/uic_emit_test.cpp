@@ -760,6 +760,63 @@ TEST(UicEmit, AlphaMasksCutTheirWidgetToShape) {
             std::string::npos);
 }
 
+TEST(UicEmit, WidthHeightMirrorsTheHeight) {
+  // `width: height` is the square idiom: width mirrors the resolved height, so
+  // the solve emits height FIRST, then width = that height variable.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit("panel { width: 8h; height: 4h;\n"
+                             "    panel { height: 3h; width: height; }\n"
+                             "}\n",
+                             &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  const size_t hp = h.find("h1 = R(");            // inner height, from 3h
+  const size_t wp = h.find("w1 = R((float)h1);"); // inner width mirrors it
+  EXPECT_NE(wp, std::string::npos) << h;
+  EXPECT_NE(hp, std::string::npos);
+  EXPECT_LT(hp, wp); // height solved before the width that depends on it
+}
+
+TEST(UicEmit, SizeIsAnArithmeticExpression) {
+  // a size is a real expression over dims and dimension references — no scripting
+  // idiom, no special case: width: parent.width / 2 just computes.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit("panel { width: 8h; height: 4h;\n"
+                             "    panel { height: 1h; width: parent.width / 2; }\n"
+                             "}\n",
+                             &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("w1 = R(((float)w0 / 2.0f));"), std::string::npos) << h;
+}
+
+TEST(UicEmit, AncestorReferenceSizesToAForebearsDimension) {
+  // `width: parent.parent.width` sizes to the GRANDPARENT's resolved width: an
+  // ancestor solves before its subtree, so the var is already in hand.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit("panel { width: 8h; height: 4h;\n"   // w0 grandparent
+                             "    panel { width: 3h; height: 3h;\n" // w1 parent
+                             "        panel { height: 1h;\n"
+                             "                width: parent.parent.width; }\n"
+                             "    }\n"
+                             "}\n",
+                             &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("w2 = R((float)w0);"), std::string::npos) << h; // grandparent
+}
+
+TEST(UicEmit, AMalformedLoneDimWarnsAndDoesNotFail) {
+  // a lone dim with a bad unit ('-2p') is not an expression — it is a
+  // classic single dim the grammar can't parse. It must WARN and degrade to
+  // zero (as it always has), never become a hard error that fails the emit.
+  std::vector<uic::Diag> diags;
+  const std::string h =
+      emit("panel { width: -2p; height: 4h; color: #808080; }\n", &diags);
+  EXPECT_FALSE(uic::hasErrors(diags)); // degradation, not failure
+  ASSERT_FALSE(diags.empty());
+  EXPECT_NE(diags[0].msg.find("unsupported dim '-2p'"), std::string::npos)
+      << diags[0].msg;
+  EXPECT_NE(h.find("sink.quad("), std::string::npos);
+}
+
 TEST(UicEmit, TheDialectsSolidTexelsAreFillsNotArt) {
   // $white / $black are the dialect's solid texels — fills, never
   // manifest entries (a host cannot load "$black" from its tree)

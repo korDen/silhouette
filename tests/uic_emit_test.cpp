@@ -524,7 +524,7 @@ TEST(UicEmit, AMatchInABindLowersToAConvertedTernary) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(
       "template chip { in kind: a | b | c;\n"
-      "    label { content: \"-\";\n"
+      "    label {\n"
       "        bind content: num = match kind {\n"
       "            a: snapshot.unit.low,\n"
       "            b: snapshot.unit.mid,\n"

@@ -36,6 +36,26 @@ TEST(UicParse, WidgetAttrsAreVerbatim) {
   EXPECT_NE(d.find("attr content=`\"Ready\"`"), std::string::npos);
 }
 
+TEST(UicParse, ATargetSetTwiceIsLoud) {
+  // a duplicate attribute, or an attribute AND its bind (the bind replaces
+  // the attribute, so both is a duplicate definition), is a parse error
+  auto loud = [](const char *src) {
+    std::vector<uic::Diag> diags;
+    (void)uic::parseModule(src, "d.ui", diags);
+    for (const uic::Diag &d : diags) {
+      if (d.msg.find("set more than once") != std::string::npos) {
+        return true;
+      }
+    }
+    return false;
+  };
+  EXPECT_TRUE(loud("panel { width: 1h; width: 2h; }\n"));   // attr twice
+  EXPECT_TRUE(loud("panel { label { content: \"-\";\n"      // attr + bind
+                   "    bind content: fmt(\"x\"); } }\n"));
+  EXPECT_FALSE(loud("panel { label { content: \"-\";\n"     // different
+                    "    bind color: rgb(1, 1, 1); } }\n")); // targets: ok
+}
+
 TEST(UicParse, ImportsConstsStructsStyles) {
   const std::string d = dumpOf(
       "import { SlotState, Variant } from \"../schema/state.ui\";\n"

@@ -759,6 +759,31 @@ private:
       }
       n.attrs.push_back(std::move(a));
     }
+    // no target set twice: two attributes, or an attribute and its bind (a
+    // bind REPLACES the attribute it drives, so both together is a duplicate
+    // definition — like `x: a; x: b;`).
+    {
+      std::vector<std::string> seen;
+      auto check = [&](const std::string &name, int line) {
+        for (const std::string &s : seen) {
+          if (s == name) {
+            diags_.push_back(
+                {std::string(file_), line, 0,
+                 "'" + name +
+                     "' is set more than once (an attribute and its bind "
+                     "both count)"});
+            return;
+          }
+        }
+        seen.push_back(name);
+      };
+      for (const Attr &a : n.attrs) {
+        check(a.name, a.line);
+      }
+      for (const Bind &b : n.binds) {
+        check(b.target, b.line);
+      }
+    }
     const bool ok = expect(Tok::kRBrace, "'}'");
     drainComments(n.bodyTail, &n.trail, openLine);
     return ok;

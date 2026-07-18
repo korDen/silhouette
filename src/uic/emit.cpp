@@ -1205,6 +1205,31 @@ struct Emit {
         }
         env[a.name] = folded;
       }
+      // A `bind <param>: <expr>` on the invocation threads a snapshot
+      // EXPRESSION into the instance. The expression is resolved HERE, in the
+      // CALLER's env (envStack still has the caller on top — the instance's
+      // env is not pushed yet), so it reads the caller's own params; the
+      // resolved form becomes the param's value, and the body's uses of that
+      // param — `bind visible: <param>` — carry it through expr()'s param
+      // substitution. This is how a template shared across call sites gets a
+      // per-call-site decision without one site's fact leaking into another.
+      for (const Bind &b : n.binds) {
+        const InParam *param = nullptr;
+        for (const InParam &p : t.ins) {
+          if (p.name == b.target) {
+            param = &p;
+            break;
+          }
+        }
+        if (param == nullptr) {
+          diags.push_back({m.name, n.line, 0,
+                           "'" + t.name + "' has no param '" + b.target +
+                               "' to bind",
+                           Diag::Severity::kWarning});
+          continue;
+        }
+        env[b.target] = expr(*b.expr);
+      }
       for (const InParam &p : t.ins) {
         if (env.find(p.name) == env.end()) {
           diags.push_back({m.name, n.line, 0,

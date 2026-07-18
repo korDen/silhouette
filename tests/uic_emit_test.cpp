@@ -301,6 +301,42 @@ TEST(UicEmit, ArgsAreTypeChecked) {
   EXPECT_EQ(errors, 2);
 }
 
+TEST(UicEmit, AParamBindThreadsAnExpressionIntoTheInstance) {
+  // a `bind <param>: <expr>` on an invocation resolves the expression in the
+  // CALLER's env and hands it to the param, so the body's use of that param
+  // (`bind visible: vis`) becomes a bind on that expression. A template
+  // shared across call sites thus gets a per-call-site decision — the
+  // default instance stays unconditional, the bound one gates on the snapshot.
+  std::vector<uic::Diag> diags;
+  const std::string h =
+      emit("template inner { in vis: bool = true;\n"
+           "    panel { bind visible: vis; color: #808080;\n"
+           "            width: 5h; height: 5h; } }\n"
+           "panel { grow: 1; growinvis: 0;\n"
+           "    inner { }\n"
+           "    inner { bind vis: snapshot.unit.hp > 0; }\n"
+           "}\n",
+           &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // the bound instance draws only under the threaded expression; it appears
+  // exactly once (the default instance carries no such gate)
+  const size_t first = h.find("s.unit.hp > 0");
+  EXPECT_NE(first, std::string::npos) << h;
+  EXPECT_EQ(h.find("s.unit.hp > 0", first + 1), h.rfind("s.unit.hp > 0"));
+}
+
+TEST(UicEmit, BindingAnUnknownParamOnAnInstanceIsLoud) {
+  // a bind whose target is not a param of the invoked template is a
+  // diagnostic (it would silently do nothing otherwise)
+  std::vector<uic::Diag> diags;
+  emit("template inner { panel { color: #808080; width: 5h; height: 5h; } }\n"
+       "panel { inner { bind nope: snapshot.unit.hp > 0; } }\n",
+       &diags);
+  ASSERT_FALSE(diags.empty());
+  EXPECT_NE(diags[0].msg.find("no param 'nope' to bind"), std::string::npos)
+      << diags[0].msg;
+}
+
 TEST(UicEmit, BoolParamsFoldIntoVisibility) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

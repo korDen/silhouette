@@ -51,6 +51,19 @@ uint32_t contentHash(std::string_view s) {
   return h == 0 ? 1u : h;
 }
 
+// an inline-enum id: raw FNV-1a, no case-fold — it must equal sid("value")
+// byte for byte, since the schema default, the host, and the bind harness
+// all id a value that way. (contentHash lowercases for asset paths; ids
+// must not.)
+uint32_t enumSid(std::string_view s) {
+  uint32_t h = 2166136261u;
+  for (const unsigned char c : s) {
+    h ^= c;
+    h *= 16777619u;
+  }
+  return h;
+}
+
 struct Dim {
   enum Kind { kPx, kPercent, kOther, kScreenH, kScreenW, kBad };
   Kind kind = kPx;
@@ -232,6 +245,11 @@ struct Emit {
   std::map<std::string, const StyleDecl *> styles;
   std::map<std::string, const TemplateDecl *> templates;
   std::set<std::string> enumNames; // schema enums -> scope-resolved refs
+  // inline-enum id constants THIS file references (UPPER -> value). Emitted
+  // per file as `inline constexpr uint32_t NAME = 0x..u;` — a param-only
+  // enum has no schema home, and `inline` makes identical defs across
+  // translation units agree instead of collide.
+  std::map<std::string, std::string> enumIds;
   std::deque<SolvedW> arena;
   std::vector<std::map<std::string, std::string>> envStack;
   std::vector<const TemplateDecl *> declStack; // enclosing param types
@@ -361,17 +379,31 @@ struct Emit {
     return u;
   }
 
-  // one operand of an inline-enum comparison: a bare VALUE lowers to the
-  // schema's named constant (its UPPER, matched case-insensitively so a
-  // consumer's SOLID and hand .ui's solid both land there); the param
-  // and a uint32_t field defer to expr() (the param folds to the constant
-  // there, the field already IS a sid)
+  // the named id constant for an inline-enum value: its UPPER, recorded so
+  // the file emits `inline constexpr uint32_t NAME = 0x..u;` for it. A value
+  // whose UPPER already stands for a DIFFERENT value collides (as it would
+  // in the schema).
+  std::string enumConst(const std::string &value) {
+    std::string up = upper(value);
+    const auto ins = enumIds.emplace(up, value);
+    if (!ins.second && ins.first->second != value) {
+      err(0, "enum values '" + ins.first->second + "' and '" + value +
+                 "' share the constant '" + up + "'");
+    }
+    return up;
+  }
+
+  // one operand of an inline-enum comparison: a bare VALUE lowers to its
+  // named id constant (its UPPER, matched case-insensitively so a consumer's
+  // SOLID and hand .ui's solid both land there); the param and a
+  // uint32_t field defer to expr() (the param folds to the constant there,
+  // the field already IS a sid)
   std::string exprEnum(const Expr &e, const std::vector<std::string> *set) {
     if (e.kind == Expr::kIdent && e.text != "snapshot" &&
         inlineEnumSet(e) == nullptr && substitute(e.text) == e.text) {
       for (const std::string &v : *set) {
         if (upper(v) == upper(e.text)) {
-          return upper(v);
+          return enumConst(v);
         }
       }
       err(e.line, "'" + e.text + "' is not a value of this enum");
@@ -386,9 +418,9 @@ struct Emit {
       if (e.text == "snapshot") {
         return "s";
       }
-      // an inline-enum param folds to the schema's named id constant
+      // an inline-enum param folds to its value's named id constant
       if (inlineEnumSet(e) != nullptr) {
-        return upper(substitute(e.text));
+        return enumConst(substitute(e.text));
       }
       // a colour-typed param folds to its instance value as a ui::Color
       // (so a bound colour can read the widget's own `color` param)
@@ -1009,7 +1041,8 @@ struct Emit {
     // transpile binds NOW — the instantiation's param environment is
     // gone by draw time
     for (const Bind &b : n.binds) {
-      sw.binds[b.target] = expr(*b.expr);
+      sw.binds[b.target] =
+          b.target == "content" ? textBind(*b.expr) : expr(*b.expr);
     }
     out.push_back(&sw);
 
@@ -1152,6 +1185,25 @@ struct Emit {
   // the run's SOURCE value (a bound snapshot field, a formatted
   // number, or a literal) — the caller keeps it in a local and takes
   // views of it, per the Sink's string-lifetime contract
+  // a `content` value is a text run. When it is a ternary (a gate on a
+  // param, say), the RESULT branches can be different text types — a snapshot
+  // char[N] field and a str param share no common type — so each result is
+  // coerced to a string_view and the branches then unify. sv() already takes
+  // a char[N], a string_view, a literal, or a TextBuf, and is idempotent, so
+  // textExpr's own outer sv() over the whole run stays correct. A non-ternary
+  // content is left untouched (that outer sv wraps it).
+  std::string textBind(const Expr &e) {
+    if (e.kind != Expr::kTernary) {
+      return expr(e);
+    }
+    auto result = [&](const Expr &r) {
+      return r.kind == Expr::kTernary ? textBind(r)
+                                      : "gen_detail::sv(" + expr(r) + ")";
+    };
+    return "(" + expr(*e.args[0]) + " ? " + result(*e.args[1]) + " : " +
+           result(*e.args[2]) + ")";
+  }
+
   std::string textSource(const SolvedW &sw) {
     if (auto b = sw.binds.find("content"); b != sw.binds.end()) {
       return b->second;
@@ -1861,6 +1913,19 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "  return t;\n"
      << "}\n"
      << "} // namespace gen_detail\n\n";
+  // inline-enum id constants THIS file uses, folded to their sid at emit
+  // time. `inline` so identical defs across translation units agree; a
+  // param-only enum (one a codegen pass invents) has no schema home, so this
+  // is where its ids live. No sid() call ships — the value is the literal.
+  if (!e.enumIds.empty()) {
+    for (const auto &nv : e.enumIds) {
+      char idbuf[16];
+      std::snprintf(idbuf, sizeof idbuf, "0x%08Xu", enumSid(nv.second));
+      os << "inline constexpr uint32_t " << nv.first << " = " << idbuf
+         << "; // " << nv.second << "\n";
+    }
+    os << "\n";
+  }
   if (opt.rectLog) {
     os << "// the rect gate's hook: absolute rect per widget, document "
           "order\n"

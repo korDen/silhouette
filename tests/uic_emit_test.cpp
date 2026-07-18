@@ -557,9 +557,11 @@ TEST(UicEmit, AMatchOverANumberNeedsNoConversion) {
 }
 
 TEST(UicEmit, AnInlineEnumComparisonLowersToNamedIds) {
-  // an inline-enum param and a bare value both become the schema's UPPER
-  // id constant in a bind — a uint32_t compare that folds at compile time
-  // (no shared type; the constant is defined in the schema header)
+  // an inline-enum param and a bare value both become a named UPPER id
+  // constant in a bind — a uint32_t compare that folds at compile time (no
+  // shared type). The generated file DEFINES the constant it uses (a
+  // param-only enum, round|square here, has no schema home), so it compiles
+  // stand-alone with the id folded to its literal.
   std::vector<uic::Diag> diags;
   const std::string h = emit("template slot { in shape: round | square;\n"
                              "    image { texture: /art/x.tga;\n"
@@ -568,6 +570,26 @@ TEST(UicEmit, AnInlineEnumComparisonLowersToNamedIds) {
                              &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   EXPECT_NE(h.find("SQUARE == SQUARE"), std::string::npos);
+  EXPECT_NE(h.find("inline constexpr uint32_t SQUARE = 0x"), std::string::npos);
+}
+
+TEST(UicEmit, ATextTernaryCoercesEachBranchToAView) {
+  // a `content` value that is a ternary can mix text types with no common
+  // C++ type — a fixed char[N] field and a str param, say — so each RESULT
+  // is coerced to a string_view and the branches then unify. sv() is
+  // idempotent, so textExpr's own outer sv() over the whole run still holds;
+  // a non-ternary content is left for that outer sv() alone.
+  std::vector<uic::Diag> diags;
+  const std::string h =
+      emit("template plate { in gate: on | off; in text: str;\n"
+           "    label { bind content: gate == on ? snapshot.unit.name "
+           ": text; } }\n"
+           "panel { plate { gate: on; text: \"-\"; } }\n",
+           &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // each result is wrapped, not the ternary as a whole
+  EXPECT_NE(h.find("? gen_detail::sv(s.unit.name) : gen_detail::sv("),
+            std::string::npos);
 }
 
 TEST(UicEmit, ComparingTwoDifferentEnumSetsIsLoud) {

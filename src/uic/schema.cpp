@@ -116,10 +116,12 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
      << "  return h;\n"
      << "}\n\n";
 
-  // one named constant per inline-enum value across the whole schema —
-  // UPPER so it can't shadow the lowercase fields, `inline` so a widely
-  // included header doesn't warn on the unused ones. A bind reads
-  // `unit.primary == SOLID`; this is that constant's single home.
+  // Inline-enum id constants are NOT defined here: a codegen pass can invent
+  // a param-only enum whose values no schema field mentions, so this header
+  // cannot be their single home. Each generated panel emits the ids IT uses
+  // (inline, folded to the sid literal — identical defs across translation
+  // units agree). We only VALIDATE that a struct's own enum values don't
+  // collide under sid().
   {
     std::map<std::string, std::string> byName; // UPPER -> value
     for (const StructDecl &s : m.structs) {
@@ -137,13 +139,6 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
           }
         }
       }
-    }
-    for (const auto &nv : byName) {
-      os << "inline constexpr uint32_t " << nv.first << " = sid(\""
-         << nv.second << "\");\n";
-    }
-    if (!byName.empty()) {
-      os << "\n";
     }
   }
 
@@ -171,11 +166,11 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
         os << t.cpp << ' ' << f.name;
         if (f.hasDefault) {
           if (f.isEnum()) {
-            std::string up = f.defaultValue;
-            for (char &c : up) {
-              c = static_cast<char>(std::toupper((unsigned char)c));
-            }
-            os << " = " << up; // the named constant emitted above
+            // the id folded at emit time — no named constant lives here
+            char idbuf[16];
+            std::snprintf(idbuf, sizeof idbuf, "0x%08Xu",
+                          sidHash(f.defaultValue));
+            os << " = " << idbuf << " /* " << f.defaultValue << " */";
           } else if (t.isEnum) {
             os << " = " << f.type << "::" << f.defaultValue;
           } else {

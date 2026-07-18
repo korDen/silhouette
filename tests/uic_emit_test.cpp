@@ -750,10 +750,9 @@ TEST(UicEmit, AlphaMasksCutTheirWidgetToShape) {
       "}\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  // the stencil: texture 0 (the white texel) cut by the mask, NOT a
-  // bare quad
-  EXPECT_NE(h.find("sink.image({ax1, ay1, w1, h1}, 0, {0, 0, 1, 1}, "
-                   "ui::Color{1.0f, 0.0f, 0.0f, 1.0f}, 0, 0x"),
+  // the stencil: the white texel cut by the mask, NOT a bare quad
+  EXPECT_NE(h.find("sink.image({ax1, ay1, w1, h1}, ui::Texture::White, "
+                   "{0, 0, 1, 1}, ui::Color{1.0f, 0.0f, 0.0f, 1.0f}, 0, 0x"),
             std::string::npos);
   EXPECT_EQ(h.find("sink.quad"), std::string::npos);
   // a real texture wears the same mask

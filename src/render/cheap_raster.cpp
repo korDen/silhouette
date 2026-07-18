@@ -167,6 +167,7 @@ float CheapRaster::mask_alpha(TextureId mask, float fx, float fy) const {
 void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
                         uint32_t flags, TextureId mask, Rect clip) {
     if (dst.w <= 0 || dst.h <= 0) return;
+    if (t == Texture::Invisible) return; // the empty id draws nothing
     const Span s = span_of(dst, clip, w_, h_);
     if (s.empty()) return;
 
@@ -176,7 +177,7 @@ void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
     const bool tileV = (flags & kTileV) != 0;
 
     const TextureData* td = nullptr;
-    if (mode_ == TextureMode::kReal) {
+    if (mode_ == TextureMode::kReal && t >= Texture::FirstIndex) {
         if (auto it = textures_.find(t); it != textures_.end() &&
                                          it->second.rgba != nullptr &&
                                          it->second.width && it->second.height)
@@ -191,9 +192,11 @@ void CheapRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
             const float u = uv.x + fx * uv.w;
 
             Rgba src;
-            if (t == 0) {
-                src = {1, 1, 1, 1}; // no texture: the solid white texel —
-                                    // tint is the fill; flags/mask apply
+            if (t == Texture::White) {
+                src = {1, 1, 1, 1}; // solid white texel: tint is the fill;
+                                    // flags/mask apply
+            } else if (t == Texture::Black) {
+                src = {0, 0, 0, 1}; // solid black texel
             } else if (mode_ == TextureMode::kSynthetic) {
                 src = synthetic_texel(t,
                                       static_cast<uint32_t>(wrap_or_clamp(u, kSyntheticGrid, tileU)),

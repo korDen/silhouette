@@ -65,8 +65,20 @@
 
 namespace ui {
 
-// Opaque texture identity, host-assigned. 0 = none.
+// Opaque texture identity, host-assigned.
 using TextureId = uint32_t;
+
+// Reserved intrinsic texture ids: the sink renders these itself, with no
+// host registration. Host textures register at ids >= Texture::FirstIndex,
+// so adding a new intrinsic never renumbers existing content. As an image
+// mask, id 0 still means "no mask" (full coverage) — a separate sentinel in
+// a separate parameter.
+struct Texture {
+  static constexpr TextureId Invisible = 0;  // draws nothing (the empty id)
+  static constexpr TextureId White = 1;      // solid white texel; tint is the fill
+  static constexpr TextureId Black = 2;      // solid black texel
+  static constexpr TextureId FirstIndex = 3; // first host-assignable id
+};
 
 // Opaque font identity, host-assigned — one id per (face, size, stroker)
 // combination, i.e. per named font resource. Sinks resolve it against their own

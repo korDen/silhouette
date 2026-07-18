@@ -262,6 +262,7 @@ float QualityRaster::mask_alpha(TextureId mask, float fx, float fy) const {
 void QualityRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
                           uint32_t flags, TextureId mask, Rect clip) {
     if (dst.w <= 0 || dst.h <= 0) return;
+    if (t == Texture::Invisible) return; // the empty id draws nothing
     const Span s = span_of(dst, clip, w_, h_);
     if (s.empty()) return;
 
@@ -272,7 +273,7 @@ void QualityRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
 
     const MipTexture* tex = nullptr;
     bool missing = false;
-    if (t != 0) {
+    if (t >= Texture::FirstIndex) { // White/Black are synthesized, not stored
         const auto it = textures_.find(t);
         if (it != textures_.end() && !it->second.levels.empty())
             tex = &it->second;
@@ -324,8 +325,10 @@ void QualityRaster::image(Rect dst, TextureId t, Rect uv, Color tint,
             const float u = uv.x + fx * uv.w;
 
             Rgba src;
-            if (t == 0) {
+            if (t == Texture::White) {
                 src = {1, 1, 1, 1}; // solid white texel: tint is the fill
+            } else if (t == Texture::Black) {
+                src = {0, 0, 0, 1}; // solid black texel
             } else if (missing) {
                 src = {1, 0, 1, 1}; // loud magenta
             } else {

@@ -21,6 +21,12 @@ std::array<int, 3> px(const CheapRaster& r, int x, int y) {
 constexpr Color kBlack{0, 0, 0, 1};
 constexpr Color kWhite{1, 1, 1, 1};
 
+// Host textures/masks register ABOVE the reserved intrinsics (Texture::White
+// etc.). Anchoring fixtures to Texture::FirstIndex keeps them correct if an
+// intrinsic id is ever added — they shift with the boundary, never collide.
+constexpr TextureId kTex = Texture::FirstIndex;      // a host texture slot
+constexpr TextureId kMask = Texture::FirstIndex + 1; // a host mask slot
+
 // ---- frame ----------------------------------------------------------------
 
 TEST(CheapRasterFrame, ClearFillsEverythingOpaque) {
@@ -115,9 +121,9 @@ const uint8_t kRedBlue[8] = {255, 0, 0, 255, 0, 0, 255, 255};
 
 TEST(CheapRasterImageReal, NearestSamplingSplitsAtTexelBoundary) {
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {kRedBlue, 2, 1});
+    r.set_texture(kTex, {kRedBlue, 2, 1});
     r.frame_begin(8, 1, kBlack);
-    r.image({0, 0, 8, 1}, 1, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
+    r.image({0, 0, 8, 1}, kTex, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 0}));
     EXPECT_EQ(px(r, 3, 0), (std::array<int, 3>{255, 0, 0})); // u=0.4375 -> texel 0
@@ -127,9 +133,9 @@ TEST(CheapRasterImageReal, NearestSamplingSplitsAtTexelBoundary) {
 
 TEST(CheapRasterImageReal, UvSubrectSelects) {
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {kRedBlue, 2, 1});
+    r.set_texture(kTex, {kRedBlue, 2, 1});
     r.frame_begin(4, 1, kBlack);
-    r.image({0, 0, 4, 1}, 1, {0.5f, 0, 0.5f, 1}, {}, 0, 0, kNoClip); // right half
+    r.image({0, 0, 4, 1}, kTex, {0.5f, 0, 0.5f, 1}, {}, 0, 0, kNoClip); // right half
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{0, 0, 255}));
     EXPECT_EQ(px(r, 3, 0), (std::array<int, 3>{0, 0, 255}));
@@ -137,9 +143,9 @@ TEST(CheapRasterImageReal, UvSubrectSelects) {
 
 TEST(CheapRasterImageReal, NegativeUvExtentFlips) {
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {kRedBlue, 2, 1});
+    r.set_texture(kTex, {kRedBlue, 2, 1});
     r.frame_begin(8, 1, kBlack);
-    r.image({0, 0, 8, 1}, 1, {1, 0, -1, 1}, {}, 0, 0, kNoClip); // horizontal flip
+    r.image({0, 0, 8, 1}, kTex, {1, 0, -1, 1}, {}, 0, 0, kNoClip); // horizontal flip
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{0, 0, 255})); // blue now left
     EXPECT_EQ(px(r, 7, 0), (std::array<int, 3>{255, 0, 0}));
@@ -148,9 +154,9 @@ TEST(CheapRasterImageReal, NegativeUvExtentFlips) {
 TEST(CheapRasterImageReal, TintModulates) {
     const uint8_t white[4] = {255, 255, 255, 255};
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {white, 1, 1});
+    r.set_texture(kTex, {white, 1, 1});
     r.frame_begin(1, 1, kBlack);
-    r.image({0, 0, 1, 1}, 1, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, 0, kNoClip);
+    r.image({0, 0, 1, 1}, kTex, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, 0, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 0}));
 }
@@ -158,11 +164,11 @@ TEST(CheapRasterImageReal, TintModulates) {
 TEST(CheapRasterImageReal, GrayscaleIsLumaBeforeTint) {
     const uint8_t red[4] = {255, 0, 0, 255};
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {red, 1, 1});
+    r.set_texture(kTex, {red, 1, 1});
     r.frame_begin(2, 1, kBlack);
-    r.image({0, 0, 1, 1}, 1, {0, 0, 1, 1}, {}, kGrayscale, 0, kNoClip);
+    r.image({0, 0, 1, 1}, kTex, {0, 0, 1, 1}, {}, kGrayscale, 0, kNoClip);
     // luma first, THEN tint: gray 76 tinted blue keeps only the blue channel
-    r.image({1, 0, 1, 1}, 1, {0, 0, 1, 1}, Color{0, 0, 1, 1}, kGrayscale, 0, kNoClip);
+    r.image({1, 0, 1, 1}, kTex, {0, 0, 1, 1}, Color{0, 0, 1, 1}, kGrayscale, 0, kNoClip);
     r.frame_end();
     // 0.299 * 255 = 76.245 -> 76
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{76, 76, 76}));
@@ -172,9 +178,9 @@ TEST(CheapRasterImageReal, GrayscaleIsLumaBeforeTint) {
 TEST(CheapRasterImageReal, AdditiveAddsAndClamps) {
     const uint8_t red[4] = {255, 0, 0, 255};
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {red, 1, 1});
+    r.set_texture(kTex, {red, 1, 1});
     r.frame_begin(1, 1, Color{0.5f, 0.5f, 0.5f, 1}); // dst = 128
-    r.image({0, 0, 1, 1}, 1, {0, 0, 1, 1}, {}, kBlendAdditive, 0, kNoClip);
+    r.image({0, 0, 1, 1}, kTex, {0, 0, 1, 1}, {}, kBlendAdditive, 0, kNoClip);
     r.frame_end();
     // r: 0.50196 + 1.0 clamps to 255; g/b unchanged
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 128, 128}));
@@ -183,12 +189,12 @@ TEST(CheapRasterImageReal, AdditiveAddsAndClamps) {
 TEST(CheapRasterImageReal, OverlayIsTwiceDstTimesSrc) {
     const uint8_t half[4] = {128, 128, 128, 255};
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {half, 1, 1});
+    r.set_texture(kTex, {half, 1, 1});
     r.frame_begin(2, 1, Color{0.5f, 0.5f, 0.5f, 1});
-    r.image({0, 0, 1, 1}, 1, {0, 0, 1, 1}, {}, kBlendOverlay, 0, kNoClip);
+    r.image({0, 0, 1, 1}, kTex, {0, 0, 1, 1}, {}, kBlendOverlay, 0, kNoClip);
     // black dst stays black no matter the src: 2*0*src = 0
     r.quad({1, 0, 1, 1}, kBlack, 0, kNoClip);
-    r.image({1, 0, 1, 1}, 1, {0, 0, 1, 1}, {}, kBlendOverlay, 0, kNoClip);
+    r.image({1, 0, 1, 1}, kTex, {0, 0, 1, 1}, {}, kBlendOverlay, 0, kNoClip);
     r.frame_end();
     // 2 * (128/255)^2 * 255 = 128.5 -> 129
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{129, 129, 129}));
@@ -197,12 +203,12 @@ TEST(CheapRasterImageReal, OverlayIsTwiceDstTimesSrc) {
 
 TEST(CheapRasterImageReal, TileUWrapsClampDoesNot) {
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {kRedBlue, 2, 1});
+    r.set_texture(kTex, {kRedBlue, 2, 1});
     r.frame_begin(8, 2, kBlack);
     // uv spans two texture widths: tiled repeats r,r,b,b,r,r,b,b ...
-    r.image({0, 0, 8, 1}, 1, {0, 0, 2, 1}, {}, kTileU, 0, kNoClip);
+    r.image({0, 0, 8, 1}, kTex, {0, 0, 2, 1}, {}, kTileU, 0, kNoClip);
     // ... unclamped it saturates at the last texel past u=1
-    r.image({0, 1, 8, 1}, 1, {0, 0, 2, 1}, {}, 0, 0, kNoClip);
+    r.image({0, 1, 8, 1}, kTex, {0, 0, 2, 1}, {}, 0, 0, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 0}));
     EXPECT_EQ(px(r, 2, 0), (std::array<int, 3>{0, 0, 255}));
@@ -218,10 +224,10 @@ TEST(CheapRasterImageReal, MaskSamplesAcrossDstIndependentOfColorUv) {
     // rule cuts the right half regardless.
     const uint8_t maskTex[8] = {255, 255, 255, 255, 255, 255, 255, 0};
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(1, {kRedBlue, 2, 1});
-    r.set_texture(2, {maskTex, 2, 1});
+    r.set_texture(kTex, {kRedBlue, 2, 1});
+    r.set_texture(kMask, {maskTex, 2, 1});
     r.frame_begin(8, 1, kBlack);
-    r.image({0, 0, 8, 1}, 1, {0.5f, 0, 0.5f, 1}, {}, 0, 2, kNoClip);
+    r.image({0, 0, 8, 1}, kTex, {0.5f, 0, 0.5f, 1}, {}, 0, kMask, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 1, 0), (std::array<int, 3>{0, 0, 255})); // left: blue shows
     EXPECT_EQ(px(r, 6, 0), (std::array<int, 3>{0, 0, 0}));   // right: masked out
@@ -235,26 +241,37 @@ TEST(CheapRasterImageReal, UnregisteredTextureIsLoudMagenta) {
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 255}));
 }
 
-TEST(CheapRasterImage, TextureZeroIsTheSolidWhiteTexel) {
-    // A masked or blended solid is image(0, ...): the tint is the fill, in
-    // BOTH modes (0 never hashes — it is the "none" sentinel, not an id).
+TEST(CheapRasterImage, ReservedTexelsAreInvisibleWhiteAndBlack) {
+    // The reserved intrinsics, in BOTH modes (they never hash and never read
+    // registered data): Invisible draws nothing; White/Black are the solid
+    // texels the tint fills. A masked or blended solid is image(White, ...).
     const uint8_t maskTex[8] = {255, 255, 255, 255, 255, 255, 255, 0};
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(2, {maskTex, 2, 1});
-    r.frame_begin(4, 1, kBlack);
-    r.image({0, 0, 2, 1}, 0, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, /*mask=*/2,
+    r.set_texture(kMask, {maskTex, 2, 1});
+    r.frame_begin(5, 1, Color{0, 0, 1, 1}); // blue canvas so Invisible shows
+    r.image({0, 0, 2, 1}, Texture::White, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0,
+            kMask, kNoClip);
+    r.image({2, 0, 1, 1}, Texture::White, {0, 0, 1, 1}, Color{0, 1, 0, 0.5f}, 0,
+            0, kNoClip);
+    r.image({3, 0, 1, 1}, Texture::Black, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
+    r.image({4, 0, 1, 1}, Texture::Invisible, {0, 0, 1, 1}, kWhite, 0, 0,
             kNoClip);
-    r.image({2, 0, 2, 1}, 0, {0, 0, 1, 1}, Color{0, 1, 0, 0.5f}, 0, 0, kNoClip);
     r.frame_end();
-    EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 0})); // masked-in solid
-    EXPECT_EQ(px(r, 1, 0), (std::array<int, 3>{0, 0, 0}));   // masked-out
-    EXPECT_EQ(px(r, 2, 0), (std::array<int, 3>{0, 128, 0})); // plain 50% solid
+    EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 0})); // White masked-in
+    EXPECT_EQ(px(r, 1, 0), (std::array<int, 3>{0, 0, 255})); // masked-out: canvas
+    EXPECT_EQ(px(r, 2, 0), (std::array<int, 3>{0, 128, 128})); // White 50% green
+    EXPECT_EQ(px(r, 3, 0), (std::array<int, 3>{0, 0, 0}));   // Black texel
+    EXPECT_EQ(px(r, 4, 0), (std::array<int, 3>{0, 0, 255})); // Invisible: untouched
 
     CheapRaster s(TextureMode::kSynthetic);
     s.frame_begin(2, 1, kBlack);
-    s.image({0, 0, 2, 1}, 0, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, 0, kNoClip);
+    s.image({0, 0, 1, 1}, Texture::White, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, 0,
+            kNoClip);
+    s.image({1, 0, 1, 1}, Texture::Invisible, {0, 0, 1, 1}, kWhite, 0, 0,
+            kNoClip);
     s.frame_end();
-    EXPECT_EQ(px(s, 0, 0), (std::array<int, 3>{255, 0, 0})); // solid, not hash
+    EXPECT_EQ(px(s, 0, 0), (std::array<int, 3>{255, 0, 0})); // White, not a hash
+    EXPECT_EQ(px(s, 1, 0), (std::array<int, 3>{0, 0, 0}));   // Invisible, not a hash
 }
 
 // ---- image: synthetic texture mode ------------------------------------------
@@ -285,10 +302,10 @@ TEST(CheapRasterImageSynthetic, NeverReadsRegisteredTexture) {
     // A garbage, non-null pointer: any read would crash. Synthetic mode must
     // never dereference it.
     CheapRaster r(TextureMode::kSynthetic);
-    r.set_texture(1, {reinterpret_cast<const uint8_t*>(0x1), 64, 64});
+    r.set_texture(kTex, {reinterpret_cast<const uint8_t*>(0x1), 64, 64});
     r.frame_begin(8, 8, kBlack);
-    r.image({0, 0, 8, 8}, 1, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
-    r.image({0, 0, 8, 8}, 1, {0, 0, 1, 1}, {}, 0, /*mask=*/1, kNoClip);
+    r.image({0, 0, 8, 8}, kTex, {0, 0, 1, 1}, {}, 0, 0, kNoClip);
+    r.image({0, 0, 8, 8}, kTex, {0, 0, 1, 1}, {}, 0, /*mask=*/kMask, kNoClip);
     r.frame_end();
     SUCCEED(); // reaching here IS the assertion
 }
@@ -377,9 +394,9 @@ TEST(CheapRasterSweep, MaskCutsTheWedge) {
     // the left half, sampled across dst exactly like image()'s mask.
     const uint8_t maskTex[8] = {255, 255, 255, 255, 255, 255, 255, 0};
     CheapRaster r(TextureMode::kReal);
-    r.set_texture(2, {maskTex, 2, 1});
+    r.set_texture(kMask, {maskTex, 2, 1});
     r.frame_begin(8, 8, kBlack);
-    r.sweep({0, 0, 8, 8}, kWhite, 0, 360, 1, 2, kNoClip);
+    r.sweep({0, 0, 8, 8}, kWhite, 0, 360, 1, kMask, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 1, 4), (std::array<int, 3>{255, 255, 255})); // left kept
     EXPECT_EQ(px(r, 6, 4), (std::array<int, 3>{0, 0, 0}));       // right cut

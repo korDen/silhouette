@@ -17,6 +17,11 @@ namespace {
 constexpr Color kBlack{0, 0, 0, 1};
 constexpr Color kWhite{1, 1, 1, 1};
 
+// Host textures/masks register ABOVE the reserved intrinsics; anchoring to
+// Texture::FirstIndex keeps these fixtures correct if an intrinsic is added.
+constexpr TextureId kTex = Texture::FirstIndex;      // a host texture slot
+constexpr TextureId kMask = Texture::FirstIndex + 1; // a host mask slot
+
 std::array<int, 3> px(const QualityRaster& r, int x, int y) {
     const uint8_t* p = &r.pixels()[(static_cast<size_t>(y) * r.width() + x) * 4];
     return {p[0], p[1], p[2]};
@@ -39,9 +44,9 @@ TEST(QualityFrame, ClearQuantizesOnceAtFrameEnd) {
 
 TEST(QualityImage, BilinearMagnificationExactLerps) {
     QualityRaster r;
-    r.set_texture(1, kRedBlue, 2, 1);
+    r.set_texture(kTex, kRedBlue, 2, 1);
     r.frame_begin(4, 1, kBlack);
-    r.image({0, 0, 4, 1}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    r.image({0, 0, 4, 1}, kTex, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
     r.frame_end();
     // texel centers at u=0.25/0.75; pixel centers sample u=.125/.375/.625/.875
     // -> tap mixes red:blue = 1:0, .75:.25, .25:.75, 0:1
@@ -66,9 +71,9 @@ TEST(QualityImage, MipLevelIsAreaAverage) {
             p[3] = 255;
         }
     QualityRaster r;
-    r.set_texture(1, checker.data(), 4, 4);
+    r.set_texture(kTex, checker.data(), 4, 4);
     r.frame_begin(2, 2, kBlack);
-    r.image({0, 0, 2, 2}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    r.image({0, 0, 2, 2}, kTex, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
     r.frame_end();
     for (int y = 0; y < 2; ++y)
         for (int x = 0; x < 2; ++x)
@@ -88,9 +93,9 @@ TEST(QualityImage, TrilinearSitsBetweenLevels) {
         }
     auto render = [&](int side) {
         QualityRaster r;
-        r.set_texture(1, checker.data(), 4, 4);
+        r.set_texture(kTex, checker.data(), 4, 4);
         r.frame_begin(4, 4, kBlack);
-        r.image({0, 0, (float)side, (float)side}, 1, {0, 0, 1, 1}, kWhite, 0,
+        r.image({0, 0, (float)side, (float)side}, kTex, {0, 0, 1, 1}, kWhite, 0,
                 0, kNoClip);
         r.frame_end();
         return px(r, 0, 0)[0];
@@ -110,34 +115,47 @@ TEST(QualityImage, PerOpClampMatchesGpuSemantics) {
     // 2 * 1.5 * 0.4 = 1.2 -> 255. The reference must match the GPU.
     QualityRaster r;
     r.frame_begin(1, 1, Color{0.5f, 0.5f, 0.5f, 1});
-    r.image({0, 0, 1, 1}, 0, {0, 0, 1, 1}, kWhite, kBlendAdditive, 0, kNoClip);
+    r.image({0, 0, 1, 1}, Texture::White, {0, 0, 1, 1}, kWhite, kBlendAdditive, 0, kNoClip);
     r.quad({0, 0, 1, 1}, Color{0.4f, 0.4f, 0.4f, 1}, kBlendOverlay, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{204, 204, 204}));
 }
 
-TEST(QualityImage, SolidZeroMagentaAndModifierNoops) {
+TEST(QualityImage, SolidWhiteMagentaAndModifierNoops) {
     QualityRaster r;
     r.frame_begin(4, 1, kBlack);
-    r.image({0, 0, 1, 1}, 0, {0, 0, 1, 1}, Color{0, 1, 0, 0.5f}, 0, 0,
-            kNoClip); // texture 0: tint is the fill
+    r.image({0, 0, 1, 1}, Texture::White, {0, 0, 1, 1}, Color{0, 1, 0, 0.5f}, 0, 0,
+            kNoClip); // the white texel: tint is the fill
     r.image({1, 0, 1, 1}, 42, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip); // magenta
-    r.image({2, 0, 1, 1}, 0, {0, 0, 1, 1}, Color{1, 0, 0, 1},
+    r.image({2, 0, 1, 1}, Texture::White, {0, 0, 1, 1}, Color{1, 0, 0, 1},
             kGrayscale | kTileU, 0, kNoClip); // modifiers no-op on solids
-    r.image({3, 0, 1, 1}, 0, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, 0, kNoClip);
+    r.image({3, 0, 1, 1}, Texture::White, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, 0, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{0, 128, 0}));
     EXPECT_EQ(px(r, 1, 0), (std::array<int, 3>{255, 0, 255}));
     EXPECT_EQ(px(r, 2, 0), px(r, 3, 0));
 }
 
+TEST(QualityImage, InvisibleDrawsNothingBlackIsTheBlackTexel) {
+    QualityRaster r;
+    r.frame_begin(2, 1, Color{0, 0, 1, 1}); // blue canvas
+    // Invisible: no draw, even with an opaque tint — the canvas survives.
+    r.image({0, 0, 1, 1}, Texture::Invisible, {0, 0, 1, 1}, kWhite, 0, 0,
+            kNoClip);
+    // Black: the solid black texel (tint identity).
+    r.image({1, 0, 1, 1}, Texture::Black, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    r.frame_end();
+    EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{0, 0, 255})); // untouched blue
+    EXPECT_EQ(px(r, 1, 0), (std::array<int, 3>{0, 0, 0}));   // black texel
+}
+
 TEST(QualityImage, GrayscaleIsLumaBeforeTint) {
     const uint8_t red[4] = {255, 0, 0, 255};
     QualityRaster r;
-    r.set_texture(1, red, 1, 1);
+    r.set_texture(kTex, red, 1, 1);
     r.frame_begin(2, 1, kBlack);
-    r.image({0, 0, 1, 1}, 1, {0, 0, 1, 1}, kWhite, kGrayscale, 0, kNoClip);
-    r.image({1, 0, 1, 1}, 1, {0, 0, 1, 1}, Color{0, 0, 1, 1}, kGrayscale, 0,
+    r.image({0, 0, 1, 1}, kTex, {0, 0, 1, 1}, kWhite, kGrayscale, 0, kNoClip);
+    r.image({1, 0, 1, 1}, kTex, {0, 0, 1, 1}, Color{0, 0, 1, 1}, kGrayscale, 0,
             kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{76, 76, 76})); // .299*255
@@ -145,14 +163,14 @@ TEST(QualityImage, GrayscaleIsLumaBeforeTint) {
 }
 
 TEST(QualityImage, MaskIsBilinearAcrossDst) {
-    // 2x1 mask (opaque | transparent) over a solid red image(0): mask taps
+    // 2x1 mask (opaque | transparent) over a solid red White texel: mask taps
     // at dst fractions .125/.375/.625/.875 -> alphas 1.0/.75/.25/0 — the
     // GRADIENT distinguishes quality's bilinear mask from cheap's nearest.
     const uint8_t maskTex[8] = {255, 255, 255, 255, 255, 255, 255, 0};
     QualityRaster r;
-    r.set_texture(2, maskTex, 2, 1);
+    r.set_texture(kMask, maskTex, 2, 1);
     r.frame_begin(4, 1, kBlack);
-    r.image({0, 0, 4, 1}, 0, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, 2, kNoClip);
+    r.image({0, 0, 4, 1}, Texture::White, {0, 0, 1, 1}, Color{1, 0, 0, 1}, 0, kMask, kNoClip);
     r.frame_end();
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{255, 0, 0}));
     EXPECT_EQ(px(r, 1, 0), (std::array<int, 3>{191, 0, 0}));
@@ -162,11 +180,11 @@ TEST(QualityImage, MaskIsBilinearAcrossDst) {
 
 TEST(QualityImage, FlipsTilesAndSubrects) {
     QualityRaster r;
-    r.set_texture(1, kRedBlue, 2, 1);
+    r.set_texture(kTex, kRedBlue, 2, 1);
     r.frame_begin(4, 3, kBlack);
-    r.image({0, 0, 4, 1}, 1, {1, 0, -1, 1}, kWhite, 0, 0, kNoClip); // hflip
-    r.image({0, 1, 4, 1}, 1, {0.75f, 0, 0.0f, 1}, kWhite, 0, 0, kNoClip);
-    r.image({0, 2, 4, 1}, 1, {0, 0, 2, 1}, kWhite, kTileU, 0, kNoClip);
+    r.image({0, 0, 4, 1}, kTex, {1, 0, -1, 1}, kWhite, 0, 0, kNoClip); // hflip
+    r.image({0, 1, 4, 1}, kTex, {0.75f, 0, 0.0f, 1}, kWhite, 0, 0, kNoClip);
+    r.image({0, 2, 4, 1}, kTex, {0, 0, 2, 1}, kWhite, kTileU, 0, kNoClip);
     r.frame_end();
     // hflip mirrors the magnification row
     EXPECT_EQ(px(r, 0, 0), (std::array<int, 3>{0, 0, 255}));
@@ -200,17 +218,17 @@ TEST(QualitySampler, AnisoKeepsTheUnminifiedAxis) {
     // color — the one-axis-minified sharpness hardware aniso gives.
     const std::vector<uint8_t> t = hstripes();
     QualityRaster iso;
-    iso.set_texture(1, t.data(), 4, 4);
+    iso.set_texture(kTex, t.data(), 4, 4);
     iso.frame_begin(1, 4, kBlack);
-    iso.image({0, 0, 1, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    iso.image({0, 0, 1, 4}, kTex, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
     iso.frame_end();
     for (int y = 0; y < 4; ++y)
         EXPECT_EQ(px(iso, 0, y), (std::array<int, 3>{128, 128, 128})) << y;
 
     QualityRaster an(QualityRaster::Sampler{0.0f, 16});
-    an.set_texture(1, t.data(), 4, 4);
+    an.set_texture(kTex, t.data(), 4, 4);
     an.frame_begin(1, 4, kBlack);
-    an.image({0, 0, 1, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    an.image({0, 0, 1, 4}, kTex, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
     an.frame_end();
     EXPECT_EQ(px(an, 0, 0), (std::array<int, 3>{255, 255, 255}));
     EXPECT_EQ(px(an, 0, 1), (std::array<int, 3>{255, 255, 255}));
@@ -231,9 +249,9 @@ TEST(QualitySampler, AnisoStillIntegratesTheMinifiedAxis) {
             p[3] = 255;
         }
     QualityRaster an(QualityRaster::Sampler{0.0f, 16});
-    an.set_texture(1, t.data(), 4, 4);
+    an.set_texture(kTex, t.data(), 4, 4);
     an.frame_begin(1, 4, kBlack);
-    an.image({0, 0, 1, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    an.image({0, 0, 1, 4}, kTex, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
     an.frame_end();
     for (int y = 0; y < 4; ++y)
         EXPECT_EQ(px(an, 0, y), (std::array<int, 3>{64, 64, 64})) << y;
@@ -245,9 +263,9 @@ TEST(QualitySampler, LodBiasShiftsTheLevel) {
     // level 0 — one center tap per row (u=.5 -> cols 1|2, rows uniform)
     // recovers the stripe colors.
     QualityRaster sharp(QualityRaster::Sampler{-2.0f, 1});
-    sharp.set_texture(1, t.data(), 4, 4);
+    sharp.set_texture(kTex, t.data(), 4, 4);
     sharp.frame_begin(1, 4, kBlack);
-    sharp.image({0, 0, 1, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    sharp.image({0, 0, 1, 4}, kTex, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
     sharp.frame_end();
     EXPECT_EQ(px(sharp, 0, 0), (std::array<int, 3>{255, 255, 255}));
     EXPECT_EQ(px(sharp, 0, 3), (std::array<int, 3>{0, 0, 0}));
@@ -256,15 +274,15 @@ TEST(QualitySampler, LodBiasShiftsTheLevel) {
     // dst y=1 (v=.375) -> level-1 vy=.25 -> .75*white+.25*black = 191,
     // where level 0 gives the exact row-1 texel, pure white.
     QualityRaster blur(QualityRaster::Sampler{1.0f, 1});
-    blur.set_texture(1, t.data(), 4, 4);
+    blur.set_texture(kTex, t.data(), 4, 4);
     blur.frame_begin(4, 4, kBlack);
-    blur.image({0, 0, 4, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    blur.image({0, 0, 4, 4}, kTex, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
     blur.frame_end();
     EXPECT_EQ(px(blur, 0, 1), (std::array<int, 3>{191, 191, 191}));
     QualityRaster plain;
-    plain.set_texture(1, t.data(), 4, 4);
+    plain.set_texture(kTex, t.data(), 4, 4);
     plain.frame_begin(4, 4, kBlack);
-    plain.image({0, 0, 4, 4}, 1, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
+    plain.image({0, 0, 4, 4}, kTex, {0, 0, 1, 1}, kWhite, 0, 0, kNoClip);
     plain.frame_end();
     EXPECT_EQ(px(plain, 0, 1), (std::array<int, 3>{255, 255, 255}));
 }
@@ -279,9 +297,9 @@ TEST(QualitySweep, QuadrantAndMask) {
     // masked full sweep: 2x1 opaque|transparent mask cuts the right side
     const uint8_t maskTex[8] = {255, 255, 255, 255, 255, 255, 255, 0};
     QualityRaster m;
-    m.set_texture(2, maskTex, 2, 1);
+    m.set_texture(kMask, maskTex, 2, 1);
     m.frame_begin(8, 8, kBlack);
-    m.sweep({0, 0, 8, 8}, kWhite, 0, 360, 1, 2, kNoClip);
+    m.sweep({0, 0, 8, 8}, kWhite, 0, 360, 1, kMask, kNoClip);
     m.frame_end();
     EXPECT_EQ(px(m, 0, 4), (std::array<int, 3>{255, 255, 255}));
     EXPECT_EQ(px(m, 7, 4), (std::array<int, 3>{0, 0, 0}));
@@ -290,9 +308,9 @@ TEST(QualitySweep, QuadrantAndMask) {
 TEST(QualityDeterminism, SameStreamSameBytes) {
     auto render = [] {
         QualityRaster r;
-        r.set_texture(1, kRedBlue, 2, 1);
+        r.set_texture(kTex, kRedBlue, 2, 1);
         r.frame_begin(8, 8, kBlack);
-        r.image({0, 0, 7, 5}, 1, {0, 0, 1, 1}, Color{1, 1, 0.5f, 0.8f}, 0, 0,
+        r.image({0, 0, 7, 5}, kTex, {0, 0, 1, 1}, Color{1, 1, 0.5f, 0.8f}, 0, 0,
                 kNoClip);
         r.sweep({1, 1, 6, 6}, Color{0, 0, 0, 0.7f}, 0, 360, 0.6f, 0, kNoClip);
         r.frame_end();

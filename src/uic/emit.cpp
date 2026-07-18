@@ -1765,8 +1765,8 @@ struct Emit {
       const std::string mask = maskOf(bag, n.line);
       const std::string flags = renderFlags(bag);
       if (mask != "0") {
-        drawLine("sink.image(" + dst + ", 0, {0, 0, 1, 1}, " + col + ", " +
-                 flags + ", " + mask + ", ui::kNoClip);");
+        drawLine("sink.image(" + dst + ", ui::Texture::White, {0, 0, 1, 1}, " +
+                 col + ", " + flags + ", " + mask + ", ui::kNoClip);");
         return;
       }
       drawLine("sink.quad(" + dst + ", " + col + ", " + flags +

@@ -77,8 +77,9 @@ class QualityRaster {
     // ---- Sink concept (images stage) -----------------------------------
     void frame_begin(uint32_t w, uint32_t h, Color clear);
     void quad(Rect dst, Color c, uint32_t flags, Rect clip);
-    // Texture 0 = the solid white texel (tint is the fill; flags and mask
-    // apply); a NONZERO unregistered id draws loud magenta.
+    // Texture::Invisible draws nothing; Texture::White / Texture::Black are
+    // the solid texels (tint is the fill; flags and mask apply). An
+    // unregistered host id (>= Texture::FirstIndex) draws loud magenta.
     void image(Rect dst, TextureId t, Rect uv, Color tint, uint32_t flags,
                TextureId mask, Rect clip);
     void sweep(Rect dst, Color c, float a0, float a1, float frac,

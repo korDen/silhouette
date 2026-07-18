@@ -532,6 +532,40 @@ struct Emit {
     case Expr::kTernary:
       return "(" + expr(*e.args[0]) + " ? " + expr(*e.args[1]) + " : " +
              expr(*e.args[2]) + ")";
+    case Expr::kMatch: {
+      // <conv>(scrutinee == V0 ? r0 : ... : rLast) — last arm is the else,
+      // each value validated against the scrutinee's inline-enum set
+      const std::vector<std::string> *set = inlineEnumSet(*e.args[0]);
+      if (set == nullptr) {
+        err(e.line, "match scrutinee '" + e.args[0]->text +
+                        "' is not an inline-enum param");
+        return "0";
+      }
+      const size_t n = e.cases.size(); // arms; args = 1 (scrutinee) + n
+      if (n < 2 || e.args.size() != n + 1) {
+        err(e.line, "match needs at least two arms");
+        return "0";
+      }
+      const std::string sc = exprEnum(*e.args[0], set); // scrutinee, folded
+      std::string out = expr(*e.args[n]);               // last arm = else
+      for (int i = static_cast<int>(n) - 2; i >= 0; --i) {
+        Expr val;
+        val.kind = Expr::kIdent;
+        val.text = e.cases[i];
+        val.line = e.line;
+        const std::string vv = exprEnum(val, set); // validates + lowers
+        out = "((" + sc + " == " + vv + ") ? " + expr(*e.args[i + 1]) +
+              " : " + out + ")";
+      }
+      if (e.text == "num") {
+        return "gen_detail::num((long long)(" + out + "))";
+      }
+      if (e.text == "ord") {
+        return "(long long)(" + out + ")";
+      }
+      err(e.line, "match conversion '" + e.text + "' (only num/ord)");
+      return "0";
+    }
     }
     return "0";
   }

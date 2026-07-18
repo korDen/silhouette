@@ -493,6 +493,29 @@ TEST(UicEmit, MatchOverAnEnumPicksAndValidatesEachArm) {
   EXPECT_EQ(h.find("match"), std::string::npos); // resolved, not emitted
 }
 
+TEST(UicEmit, AMatchInABindLowersToAConvertedTernary) {
+  // `bind content: num = match kind { a: e0, b: e1, c: e2 }` — a readable
+  // multi-way value. It lowers to num(kind == a ? e0 : kind == b ? e1 :
+  // e2): the scrutinee folds to this instance's value, each arm value is
+  // validated against the enum, and the LAST arm is the else.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template chip { in kind: a | b | c;\n"
+      "    label { content: \"-\";\n"
+      "        bind content: num = match kind {\n"
+      "            a: snapshot.unit.low,\n"
+      "            b: snapshot.unit.mid,\n"
+      "            c: snapshot.unit.high }; } }\n"
+      "panel { chip { kind: a; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("gen_detail::num("), std::string::npos);   // the conv
+  EXPECT_NE(h.find("(A == A)"), std::string::npos);           // first arm
+  EXPECT_NE(h.find("(A == B)"), std::string::npos);           // second arm
+  EXPECT_NE(h.find("s.unit.high"), std::string::npos); // else, no cond
+  EXPECT_EQ(h.find("A == C"), std::string::npos); // the else has no compare
+}
+
 TEST(UicEmit, AnInlineEnumComparisonLowersToNamedIds) {
   // an inline-enum param and a bare value both become the schema's UPPER
   // id constant in a bind — a uint32_t compare that folds at compile time

@@ -100,6 +100,19 @@ void printExpr(std::ostream &os, const Expr &e, int parentPrec) {
     os << " : ";
     printExpr(os, *e.args[2], 0);
     break;
+  case Expr::kMatch:
+    os << e.text << " = match ";
+    printExpr(os, *e.args[0], 0); // scrutinee
+    os << " { ";
+    for (size_t i = 0; i < e.cases.size(); ++i) {
+      if (i > 0) {
+        os << ", ";
+      }
+      os << e.cases[i] << ": ";
+      printExpr(os, *e.args[i + 1], 0); // result
+    }
+    os << " }";
+    break;
   }
   if (parens) {
     os << ')';

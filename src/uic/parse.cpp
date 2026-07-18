@@ -649,7 +649,10 @@ private:
           continue;
         }
         b.target = std::string(bn.text);
-        b.expr = parseExpr();
+        b.expr = parseMatchBind(); // `<conv> = match scrutinee { v: e, ... }`
+        if (b.expr == nullptr) {
+          b.expr = parseExpr();
+        }
         if (b.expr == nullptr) {
           sync();
           continue;
@@ -819,6 +822,53 @@ private:
   }
 
   // ---- expressions ------------------------------------------------------------
+
+  // `<conv> = match <scrutinee> { VALUE: <expr>, ... }` — a readable
+  // multi-way bind value (nicer than a ternary chain when >2 cases). The
+  // last arm is the else. Returns null (restoring) when the value is not
+  // this form, so the caller falls back to a plain expression.
+  ExprPtr parseMatchBind() {
+    const State start = save();
+    if (!at(Tok::kIdent)) {
+      return nullptr;
+    }
+    const Token conv = take();
+    if (!eat(Tok::kEq) || !atIdent("match")) {
+      restore(start);
+      return nullptr;
+    }
+    take(); // 'match'
+    const Token sc = expectIdent("match scrutinee");
+    if (sc.kind != Tok::kIdent || !expect(Tok::kLBrace, "'{'")) {
+      return nullptr;
+    }
+    auto m = std::make_unique<Expr>();
+    m->kind = Expr::kMatch;
+    m->text = std::string(conv.text); // the render conversion (num/ord)
+    m->line = conv.line;
+    auto scr = std::make_unique<Expr>();
+    scr->kind = Expr::kIdent;
+    scr->text = std::string(sc.text);
+    scr->line = sc.line;
+    m->args.push_back(std::move(scr)); // args[0] = scrutinee
+    while (!at(Tok::kRBrace) && !at(Tok::kEnd)) {
+      const Token v = expectIdent("match value");
+      if (v.kind != Tok::kIdent || !expect(Tok::kColon, "':'")) {
+        sync();
+        break;
+      }
+      ExprPtr r = parseExpr();
+      if (r == nullptr) {
+        sync();
+        break;
+      }
+      m->cases.push_back(std::string(v.text));
+      m->args.push_back(std::move(r));
+      eat(Tok::kComma); // optional separator between arms
+    }
+    expect(Tok::kRBrace, "'}'");
+    return m;
+  }
 
   ExprPtr parseExpr() { return parseTernary(); }
 
@@ -1076,6 +1126,15 @@ void dumpExpr(const Expr &e, std::ostream &os) {
     dumpExpr(*e.args[1], os);
     os << ' ';
     dumpExpr(*e.args[2], os);
+    os << ')';
+    return;
+  case Expr::kMatch:
+    os << "(match:" << e.text << ' ';
+    dumpExpr(*e.args[0], os);
+    for (size_t i = 0; i < e.cases.size(); ++i) {
+      os << ' ' << e.cases[i] << ':';
+      dumpExpr(*e.args[i + 1], os);
+    }
     os << ')';
     return;
   }

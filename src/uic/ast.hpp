@@ -26,10 +26,13 @@ struct Expr {
     kUnary,   // text = "!" or "-", args[0]
     kBinary,  // text = operator, args[0] op args[1]
     kTernary, // args[0] ? args[1] : args[2]
+    kMatch,   // text = conv (num/ord); args[0] = scrutinee; args[1..N] =
+              // the arm result exprs; cases[i] = the value for args[i+1]
   };
   Kind kind = kIdent;
   std::string text;
   std::vector<ExprPtr> args;
+  std::vector<std::string> cases; // kMatch: arm values, parallel to args[1..]
   int line = 0;
 };
 

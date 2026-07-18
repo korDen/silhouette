@@ -39,6 +39,7 @@ template chip {
     panel {
         width: 7h; height: 100%;
         bind visible: snapshot.slots[slot].exists && slot != 3;
+        bind content: num = match shape { round: slot, square: slot + 1, wide: slot + 2 };
         action click: game.Poke(slot);
         image {
             texture: match shape {

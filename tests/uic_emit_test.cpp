@@ -17,6 +17,43 @@ std::string emit(std::string_view src, std::vector<uic::Diag> *diags) {
   return uic::emitPanelHeader(m, opt, *diags);
 }
 
+std::string emitHier(std::string_view src, std::vector<uic::Diag> *diags) {
+  std::vector<uic::Diag> parseDiags;
+  const uic::Module m = uic::parseModule(src, "panel.ui", parseDiags);
+  EXPECT_TRUE(parseDiags.empty())
+      << (parseDiags.empty() ? "" : parseDiags[0].msg);
+  uic::EmitOptions opt;
+  std::string hier;
+  uic::emitPanelHeader(m, opt, *diags, &hier);
+  return hier;
+}
+
+TEST(UicEmit, HierWalkCarriesProvenanceAndSharesDraws) {
+  // The parity walk: each drawn node opens a src_path:src_line marker before
+  // its draws. src_path rides on a template root; a nested node inherits it
+  // and carries only its own line. The draws are the render's, verbatim.
+  std::vector<uic::Diag> diags;
+  const std::string hier = emitHier(
+      "template t {\n"
+      "    panel { src_path: \"pkg.package\"; src_line: 3;\n"
+      "        color: #808080; width: 5h; height: 5h;\n"
+      "        image { src_line: 5; texture: /a.tga;\n"
+      "                width: 2h; height: 2h; } } }\n"
+      "t { }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  // the template root: its own path + line
+  EXPECT_NE(hier.find("sink.node(\"pkg.package\", 3, \"panel\""),
+            std::string::npos)
+      << hier;
+  // a nested node inherits the path, carries its own line
+  EXPECT_NE(hier.find("sink.node(\"pkg.package\", 5, \"image\""),
+            std::string::npos)
+      << hier;
+  // and the draws are still there (shared emitDraw)
+  EXPECT_NE(hier.find("sink.image("), std::string::npos) << hier;
+}
+
 TEST(UicEmit, UnitGrammarFoldsToArithmetic) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

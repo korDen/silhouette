@@ -280,6 +280,11 @@ struct Emit {
   const EmitOptions &opt;
   std::vector<Diag> &diags;
   std::ostringstream decl, solve, draw;
+  // the structural-walk body: same geometry (decl+solve), but each node opens
+  // a marker carrying its src_path:src_line before its draws, for the parity
+  // diff. Built by a second pass that retargets drawLine here via drawOut.
+  std::ostringstream walk;
+  std::ostringstream *drawOut = &draw;
   std::map<std::string, uint32_t> texIds;
   std::vector<std::string> texOrder;
   std::map<std::string, uint32_t> fontIds; // name -> id (content hash)
@@ -319,7 +324,7 @@ struct Emit {
     solve << std::string((size_t)solveIndent * 2, ' ') << s << '\n';
   }
   void drawLine(const std::string &s) {
-    draw << std::string((size_t)drawIndent * 2, ' ') << s << '\n';
+    *drawOut << std::string((size_t)drawIndent * 2, ' ') << s << '\n';
   }
 
   // does the host's tree carry this art? (the archive law: a source
@@ -1798,6 +1803,60 @@ struct Emit {
     }
   }
 
+  // The parity walk's twin of drawNode: identical ax/ay, gate, emitDraw, and
+  // recursion (so the draws are byte-for-byte the render's), but it opens a
+  // node marker carrying provenance instead of the rect-log. Hidden subtrees
+  // drop exactly as the render drops them (we compare the visible tree). The
+  // marker sits INSIDE the gate, so only a node the render actually draws opens
+  // one. `srcPath` inherits from the nearest template root; a node with its own
+  // src_path (a template root) refreshes it for its subtree.
+  void drawNodeHier(const SolvedW &sw, const std::string &pax,
+                    const std::string &pay, const std::string &srcPath) {
+    const Node &n = *sw.node;
+    const std::string sfx = std::to_string(sw.idx);
+    const std::string ax = "ax" + sfx, ay = "ay" + sfx;
+    drawLine("const float " + ax + " = " + pax + " + x" + sfx + ";");
+    drawLine("const float " + ay + " = " + pay + " + y" + sfx + ";");
+    const std::string *vis = get(sw.attrs, "visible");
+    if (vis != nullptr && (*vis == "0" || *vis == "false")) {
+      return; // static-hidden: no marker, no draws, no descent
+    }
+    const std::string *ownPath = get(sw.attrs, "src_path");
+    const std::string path = ownPath != nullptr ? *ownPath : srcPath;
+    const std::string *ln = get(sw.attrs, "src_line");
+    const std::string *nm = get(sw.attrs, "name");
+    const auto bv = sw.binds.find("visible");
+    std::string gate = bv != sw.binds.end() ? bv->second : std::string();
+    if (!sw.guard.empty()) {
+      gate = gate.empty() ? sw.guard : "(" + sw.guard + ") && (" + gate + ")";
+    }
+    const bool bound = !gate.empty();
+    if (bound) {
+      drawLine("if (" + gate + ") {");
+      ++drawIndent;
+    }
+    // src_path is stored verbatim, already quoted ("..."); src_line is a bare
+    // number. tag/name are bare identifiers and need quoting here.
+    const std::string pathLit = path.empty() ? "\"\"" : path;
+    drawLine("sink.node(" + pathLit + ", " + (ln != nullptr ? *ln : "0") +
+             ", \"" + n.tag + "\", \"" + (nm != nullptr ? *nm : std::string()) +
+             "\", {" + ax + ", " + ay + ", w" + sfx + ", h" + sfx + "});");
+    emitDraw(sw, ax, ay, "w" + sfx, "h" + sfx);
+    if (sw.reverse) {
+      for (auto it = sw.kids.rbegin(); it != sw.kids.rend(); ++it) {
+        drawNodeHier(**it, ax, ay, path);
+      }
+    } else {
+      for (const SolvedW *c : sw.kids) {
+        drawNodeHier(*c, ax, ay, path);
+      }
+    }
+    if (bound) {
+      --drawIndent;
+      drawLine("}");
+    }
+  }
+
   std::string colorLiteral(const SolvedW &sw, float def) {
     // a bound colour wins over the static attr: the transpiled expr already
     // evaluates to a ui::Color (a colour-typed param / color(...) / #hex)
@@ -2055,13 +2114,19 @@ struct Emit {
     for (const SolvedW *r : roots) {
       drawNode(*r, "0.0f", "0.0f");
     }
+    // second pass: the same tree into the walk stream, node markers + draws.
+    drawOut = &walk;
+    for (const SolvedW *r : roots) {
+      drawNodeHier(*r, "0.0f", "0.0f", "");
+    }
+    drawOut = &draw;
   }
 };
 
 } // namespace
 
 std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
-                            std::vector<Diag> &diags) {
+                            std::vector<Diag> &diags, std::string *hierOut) {
   Emit e(m, opt, diags);
   e.run();
 
@@ -2209,21 +2274,42 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
     std::snprintf(idbuf, sizeof idbuf, "0x%08Xu", e.fontIds[name]);
     os << "  {" << idbuf << ", \"" << name << "\"},\n";
   }
-  os << "};\n\n"
-     << "template <class Sink>\n"
-     << "void " << fn
-     << "(const UiSnapshot &s, float screenW, float screenH, Sink &sink"
-     << (opt.rectLog ? ", RectLog *log = nullptr" : "") << ") {\n"
-     << "  using gen_detail::R;\n"
-     << "  (void)s;\n"
-     << "  const float W = screenW, H = screenH;\n"
-     << "  (void)W;\n"
-     << "  // ---- rect variables (parent-relative) ----\n"
-     << e.decl.str() << "  // ---- solve (the schedule) ----\n"
-     << e.solve.str() << "  // ---- draw (render order, absolute) ----\n"
-     << e.draw.str() << "}\n\n"
-     << "} // namespace " << opt.ns << "\n";
-  return os.str();
+  os << "};\n\n";
+  // The preamble + both manifests are shared; the panel function and the
+  // parity-walk twin differ only in their body (draw vs walk) and whether they
+  // take the rect-log. Emit each from the same decl+solve so the geometry is
+  // identical; the walk adds a src_path:src_line node() before each node's
+  // draws (see drawNodeHier).
+  const std::string nsClose = "} // namespace " + opt.ns + "\n";
+  auto emitFn = [&](const std::string &name, const std::string &body,
+                    const char *bodyLabel, bool withLog) {
+    std::ostringstream f;
+    f << "template <class Sink>\n"
+      << "void " << name
+      << "(const UiSnapshot &s, float screenW, float screenH, Sink &sink"
+      << (withLog && opt.rectLog ? ", RectLog *log = nullptr" : "") << ") {\n"
+      << "  using gen_detail::R;\n"
+      << "  (void)s;\n"
+      << "  const float W = screenW, H = screenH;\n"
+      << "  (void)W;\n"
+      << "  // ---- rect variables (parent-relative) ----\n"
+      << e.decl.str() << "  // ---- solve (the schedule) ----\n"
+      << e.solve.str() << bodyLabel << body << "}\n\n";
+    return f.str();
+  };
+  const std::string prefix = os.str();
+  if (hierOut != nullptr) {
+    *hierOut = prefix +
+               emitFn(fn + "_hier", e.walk.str(),
+                      "  // ---- walk (hierarchy + per-node draws) ----\n",
+                      /*withLog=*/false) +
+               nsClose;
+  }
+  return prefix +
+         emitFn(fn, e.draw.str(),
+                "  // ---- draw (render order, absolute) ----\n",
+                /*withLog=*/true) +
+         nsClose;
 }
 
 } // namespace uic

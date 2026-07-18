@@ -16,6 +16,7 @@ int main(int argc, char **argv) {
   bool rectLog = false;
   std::string schemaOut;
   std::string emitOut;
+  std::string hierOut;
   std::string assetRoot;
   std::string schemaInclude = "generated/UiSnapshot.h";
   std::string ns = "hud";
@@ -36,6 +37,8 @@ int main(int argc, char **argv) {
       schemaOut = next();
     } else if (std::strcmp(argv[i], "--emit") == 0) {
       emitOut = next();
+    } else if (std::strcmp(argv[i], "--emit-hier") == 0) {
+      hierOut = next();
     } else if (std::strcmp(argv[i], "--assets") == 0) {
       assetRoot = next();
     } else if (std::strcmp(argv[i], "--styles") == 0) {
@@ -161,7 +164,9 @@ int main(int argc, char **argv) {
         continue;
       }
       std::vector<uic::Diag> emitDiags;
-      const std::string header = uic::emitPanelHeader(m, opt, emitDiags);
+      std::string hierStr;
+      const std::string header = uic::emitPanelHeader(
+          m, opt, emitDiags, hierOut.empty() ? nullptr : &hierStr);
       int skips = 0;
       for (const uic::Diag &d : emitDiags) {
         if (d.severity == uic::Diag::Severity::kWarning) {
@@ -188,6 +193,16 @@ int main(int argc, char **argv) {
       }
       out << header;
       std::printf("panel -> %s\n", emitOut.c_str());
+      if (!hierOut.empty()) {
+        std::ofstream hf(hierOut, std::ios::binary);
+        if (!hf) {
+          std::fprintf(stderr, "%s: cannot write\n", hierOut.c_str());
+          ++failures;
+          continue;
+        }
+        hf << hierStr;
+        std::printf("hier -> %s\n", hierOut.c_str());
+      }
     }
   }
   return failures == 0 ? 0 : 1;

@@ -65,7 +65,12 @@ struct EmitOptions {
   std::vector<const Module *> styleModules;
   std::vector<const Module *> withModules;
 };
+// Returns the panel header (the bot_center render function). When `hierOut` is
+// non-null it also receives a companion header defining a `<panel>_hier`
+// function: the same geometry, but each node opens a src_path:src_line marker
+// before its draws, for the structural parity diff (no rect-log parameter).
 std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
-                            std::vector<Diag> &diags);
+                            std::vector<Diag> &diags,
+                            std::string *hierOut = nullptr);
 
 } // namespace uic

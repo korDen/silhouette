@@ -1976,6 +1976,9 @@ struct Emit {
                ", " + h + ") / 2);");
       drawLine("const float cwm = " + w + " - 2 * bt, chm = " + h +
                " - 2 * bt;");
+      // one colour for all nine pieces, hoisted so a bound colour is read
+      // once and the skip below can test its alpha
+      drawLine("const ui::Color fc = " + col + ";");
       for (const auto &p : kPieces) {
         const std::string piece =
             tex->substr(0, dot) + p.suffix + tex->substr(dot);
@@ -1983,11 +1986,13 @@ struct Emit {
             p.gx == 0 ? ax : (p.gx == 1 ? ax + " + bt" : ax + " + bt + cwm");
         const std::string y =
             p.gy == 0 ? ay : (p.gy == 1 ? ay + " + bt" : ay + " + bt + chm");
-        drawLine("sink.image({" + x + ", " + y + ", " +
-                 (p.gx == 1 ? "cwm" : "bt") + ", " +
-                 (p.gy == 1 ? "chm" : "bt") + "}, " +
-                 texIdExpr(piece, n.line) + ", {0, 0, 1, 1}, " + col +
-                 ", " + fflags + ", 0, ui::kNoClip);");
+        const std::string pw = p.gx == 1 ? "cwm" : "bt";
+        const std::string ph = p.gy == 1 ? "chm" : "bt";
+        // a piece with no area or a fully transparent colour issues no draw
+        drawLine("if (" + pw + " > 0 && " + ph + " > 0 && fc.a > 0) " +
+                 "sink.image({" + x + ", " + y + ", " + pw + ", " + ph +
+                 "}, " + texIdExpr(piece, n.line) + ", {0, 0, 1, 1}, fc, " +
+                 fflags + ", 0, ui::kNoClip);");
       }
       --drawIndent;
       drawLine("}");

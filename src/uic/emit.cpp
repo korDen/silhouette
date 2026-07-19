@@ -1960,12 +1960,15 @@ struct Emit {
           ")";
       const std::string col = colorLiteral(sw, 1);
       const size_t dot = tex->rfind('.');
+      // 9-slice pieces in a fixed emit order -- center, then the bottom row,
+      // the sides, the top row. The nine pieces do not overlap, so the order
+      // is a convention (shared by every backend), not a visual choice.
       static const struct {
         const char *suffix;
         int gx, gy;
-      } kPieces[9] = {{"_tl", 0, 0}, {"_t", 1, 0},  {"_tr", 2, 0},
-                      {"_l", 0, 1},  {"_c", 1, 1},  {"_r", 2, 1},
-                      {"_bl", 0, 2}, {"_b", 1, 2},  {"_br", 2, 2}};
+      } kPieces[9] = {{"_c", 1, 1},  {"_bl", 0, 2}, {"_b", 1, 2},
+                      {"_br", 2, 2}, {"_l", 0, 1},  {"_r", 2, 1},
+                      {"_tl", 0, 0}, {"_t", 1, 0},  {"_tr", 2, 0}};
       const std::string fflags = renderFlags(bag);
       drawLine("{");
       ++drawIndent;

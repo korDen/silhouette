@@ -18,7 +18,7 @@ int main(int argc, char **argv) {
   std::string emitOut;
   std::string hierOut;
   std::string assetRoot;
-  std::string schemaInclude = "generated/UiSnapshot.h";
+  std::string schemaInclude = "schema.h"; // caller passes the real path
   std::string ns = "hud";
   std::vector<std::string> files;
   std::vector<std::string> styleFiles;

@@ -515,9 +515,10 @@ TEST(UicEmit, FmtComposesARunFromAFormatAndArgs) {
       "}\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  EXPECT_NE(h.find("gen_detail::fmt(\"{} / {}\", (s.unit.hp), (s.unit.hpMax))"),
+  EXPECT_NE(h.find("gen_detail::fmt(FMT_COMPILE(\"{} / {}\"), (s.unit.hp), "
+                   "(s.unit.hpMax))"),
             std::string::npos);
-  EXPECT_NE(h.find("gen_detail::fmt(\"+{}\", (s.unit.hpRegen))"),
+  EXPECT_NE(h.find("gen_detail::fmt(FMT_COMPILE(\"+{}\"), (s.unit.hpRegen))"),
             std::string::npos);
   EXPECT_NE(h.find("const auto src1 = gen_detail::fmt("), std::string::npos);
   EXPECT_NE(h.find("sink.text(pen1, gen_detail::sv(src1),"),

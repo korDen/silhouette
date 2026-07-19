@@ -51,13 +51,13 @@ std::string emitSchemaHeader(const Module &m, std::string_view ns,
 
 // The emit pass (absolute subset — src/uic/emit.cpp documents the
 // laws): a panel module becomes a self-contained header with
-//   template <class Sink> void <module>(const UiSnapshot&, float, float,
-//   Sink&)
+//   template <class Snapshot, class Sink> void <module>(const Snapshot&,
+//   float, float, Sink&)
 // plus the {id, path} texture manifest. With assetRoot set, every
 // authored path (frame families expanded) must exist on disk.
 struct EmitOptions {
   std::string ns = "hud";
-  std::string schemaInclude = "generated/UiSnapshot.h";
+  std::string schemaInclude = "schema.h"; // caller passes the real path
   std::string assetRoot; // empty = skip validation
   bool rectLog = false;  // emit the rect-gate hook (RectLog parameter)
   // styles, templates, and asset consts resolve from the module itself
@@ -65,7 +65,7 @@ struct EmitOptions {
   std::vector<const Module *> styleModules;
   std::vector<const Module *> withModules;
 };
-// Returns the panel header (the bot_center render function). When `hierOut` is
+// Returns the panel header (the <module> render function). When `hierOut` is
 // non-null it also receives a companion header defining a `<panel>_hier`
 // function: the same geometry, but each node opens a src_path:src_line marker
 // before its draws, for the structural parity diff (no rect-log parameter).

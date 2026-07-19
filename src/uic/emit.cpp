@@ -2035,8 +2035,10 @@ struct Emit {
           hf != nullptr && *hf == "1") {
         uv = "{1, 0, -1, 1}";
       }
-      drawLine("sink.image(" + dst + ", " + idExpr + ", " + uv + ", " +
-               colorLiteral(sw, 1) + ", " + flags + ", " +
+      // a fully transparent tint issues no draw
+      const std::string imgCol = colorLiteral(sw, 1);
+      drawLine("if ((" + imgCol + ").a > 0) sink.image(" + dst + ", " +
+               idExpr + ", " + uv + ", " + imgCol + ", " + flags + ", " +
                maskOf(bag, n.line) + ", ui::kNoClip);");
       return;
     }
@@ -2046,13 +2048,15 @@ struct Emit {
       const std::string col = colorLiteral(sw, def);
       const std::string mask = maskOf(bag, n.line);
       const std::string flags = renderFlags(bag);
+      // a fully transparent widget issues no draw
       if (mask != "0") {
-        drawLine("sink.image(" + dst + ", ui::Texture::White, {0, 0, 1, 1}, " +
-                 col + ", " + flags + ", " + mask + ", ui::kNoClip);");
+        drawLine("if ((" + col + ").a > 0) sink.image(" + dst +
+                 ", ui::Texture::White, {0, 0, 1, 1}, " + col + ", " + flags +
+                 ", " + mask + ", ui::kNoClip);");
         return;
       }
-      drawLine("sink.quad(" + dst + ", " + col + ", " + flags +
-               ", ui::kNoClip);");
+      drawLine("if ((" + col + ").a > 0) sink.quad(" + dst + ", " + col +
+               ", " + flags + ", ui::kNoClip);");
     }
   }
 

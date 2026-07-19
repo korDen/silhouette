@@ -2,6 +2,7 @@
   "name": "silhouette",
   "version": "2.0.0",
   "dependencies": [
+    "fmt",
     "freetype",
     "gtest",
     "harfbuzz",

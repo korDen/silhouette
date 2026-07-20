@@ -1577,12 +1577,18 @@ struct Emit {
       return;
     }
     const std::string font = fontOf(sw);
+    // ROUND each fit component: every size component is rounded per widget
+    // (R == floor(f+0.5)) before it joins the size. Leaving it unrounded put
+    // a fitxpadding of "0.1h" (1.08px) on unrounded, so a 6px "0" fit to
+    // 7.08 instead of 7 — and that 0.08 rode the grow chain into 1px
+    // offsets downstream. The measured text width is already integral (the
+    // sink sums ceil'd advances), so only these fit-derived terms need it.
     auto sizeAttr = [&](const char *key, bool horizontal) -> std::string {
       const std::string *v = get(sw.attrs, key);
       if (v == nullptr) {
         return "";
       }
-      return dimExpr(parseDim(*v), horizontal, pw, ph, false);
+      return "R(" + dimExpr(parseDim(*v), horizontal, pw, ph, false) + ")";
     };
     if (fitX) {
       solveLine(vw + " = sink.measure(" + font + ", " + textExpr(sw) + ");");

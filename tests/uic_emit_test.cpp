@@ -758,7 +758,12 @@ TEST(UicEmit, FitxLabelsMeasureInTheSolve) {
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   EXPECT_NE(h.find("w1 = sink.measure("), std::string::npos);
-  EXPECT_NE(h.find("w1 += "), std::string::npos); // fitxpadding
+  // the fitxpadding is ROUNDED by the per-widget round (floor(f+0.5)).
+  // Without R() a "0.1h" padding (1.08px) fit a 6px glyph to 7.08 instead
+  // of 7 — and the 0.08 rode the grow chain into 1px offsets downstream.
+  // The measure itself stays unrounded (the sink already sums ceil'd
+  // advances).
+  EXPECT_NE(h.find("w1 += R("), std::string::npos); // rounded fitxpadding
   // and the measured width feeds the chain: the icon follows the text
   EXPECT_NE(h.find("tx0 = x1; ty0 = y1; tw0 = w1;"), std::string::npos);
 }

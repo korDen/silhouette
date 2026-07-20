@@ -185,6 +185,57 @@ TEST(UicEmit, MaxArityIsLoud) {
       << diags[0].msg;
 }
 
+// WHICH widgetstate layer renders is the owner's choice, made from its
+// `enabled` flag exactly as the selection orders do: a disabled owner
+// takes `disabled`, anything else takes `up`. Both layers are emitted, each
+// guarded — before this only `up` was emitted at all, so a disabled button
+// showed its enabled art.
+TEST(UicEmit, WidgetStateFollowsTheOwnersEnabledFlag) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { button { texture: $invis;\n"
+      "    bind enabled: snapshot.unit.hp > 0;\n"
+      "    widgetstate up { image { texture: /art/up.img; } }\n"
+      "    widgetstate disabled { image { texture: /art/dis.img; } } } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("/art/up.img"), std::string::npos) << h;
+  EXPECT_NE(h.find("/art/dis.img"), std::string::npos) << h;
+  // the up layer draws while enabled, the disabled layer while not
+  EXPECT_NE(h.find("if ((s.unit.hp > 0))"), std::string::npos) << h;
+  EXPECT_NE(h.find("if (!((s.unit.hp > 0)))"), std::string::npos) << h;
+}
+
+// With nothing bound to `enabled` the owner is constantly enabled: `up` stays
+// unguarded and the disabled layer is dropped — byte-identical to what a build
+// emitted before states were selectable.
+TEST(UicEmit, AnUnboundOwnerKeepsOnlyTheRestingState) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { button { texture: $invis;\n"
+      "    widgetstate up { image { texture: /art/up.img; } }\n"
+      "    widgetstate disabled { image { texture: /art/dis.img; } } } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("/art/up.img"), std::string::npos) << h;
+  EXPECT_EQ(h.find("/art/dis.img"), std::string::npos) << h;
+}
+
+// The selection orders FALL THROUGH: an owner with no `disabled` layer shows
+// `up` even while disabled. So the up guard only appears when there is a
+// disabled layer to lose to.
+TEST(UicEmit, TheRestingStateShowsWhenThereIsNoDisabledLayer) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { button { texture: $invis;\n"
+      "    bind enabled: snapshot.unit.hp > 0;\n"
+      "    widgetstate up { image { texture: /art/up.img; } } } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("/art/up.img"), std::string::npos) << h;
+  EXPECT_EQ(h.find("if ((s.unit.hp > 0))"), std::string::npos) << h;
+}
+
 TEST(UicEmit, ManifestCarriesIdsAndPaths) {
   std::vector<uic::Diag> diags;
   const std::string h =

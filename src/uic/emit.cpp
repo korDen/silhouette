@@ -1135,12 +1135,16 @@ struct Emit {
       }
       return;
     }
-    // a widgetstate is a state LAYER: only the resting state ('up')
-    // renders in the static build; states are excluded from unions and
-    // float chains
+    // a widgetstate is a state LAYER. WHICH one renders is the owner's
+    // choice, made from its `enabled` flag — the guard is applied by the
+    // parent, which is where that flag is in scope (see kWidgetState there).
+    // `over`/`down` need a hover/press input nothing supplies yet, and are
+    // unreachable meanwhile: the selection orders only ever reach
+    // them via hover, so a static build picks `up` or `disabled` and nothing
+    // else. States are excluded from unions and float chains.
     const bool isState = n.kind == Node::kWidgetState;
-    if (isState && n.tag != "up") {
-      return; // the other states await interaction (silent by design)
+    if (isState && n.tag != "up" && n.tag != "disabled") {
+      return; // await interaction (silent by design)
     }
     if (!isState &&
         n.tag != "panel" && n.tag != "image" && n.tag != "frame" &&
@@ -1710,9 +1714,60 @@ struct Emit {
       solveLine("tx" + sfx + " = 0; ty" + sfx + " = 0; tw" + sfx +
                 " = 0; th" + sfx + " = 0; hasT" + sfx + " = 0;");
     }
+    // WHICH state layer renders, by the selection order: a disabled owner
+    // takes `disabled`, anything else takes `up`. The orders fall through, so
+    // an owner with no `disabled` layer shows `up` even when disabled — hence
+    // the hasDisabled term. `enabled` is the owner's bind if it has one, its
+    // static attr otherwise, and true by default; a constant-true owner leaves
+    // `up` unguarded and drops `disabled` entirely, which is exactly what a
+    // build with nothing bound to enabled emitted before.
+    std::string enabledExpr; // empty = constantly enabled
+    bool alwaysDisabled = false;
+    if (const std::string *be = get(sw.binds, "enabled")) {
+      enabledExpr = *be;
+    } else if (const std::string *ae = get(sw.attrs, "enabled")) {
+      alwaysDisabled = *ae == "0" || *ae == "false";
+    }
+    bool hasDisabled = false;
+    for (const NodePtr &c : n.children) {
+      hasDisabled = hasDisabled ||
+                    (c->kind == Node::kWidgetState && c->tag == "disabled");
+    }
+    auto stateGuard = [&](const std::string &state) -> std::string {
+      if (state == "disabled") {
+        if (alwaysDisabled) {
+          return ""; // unguarded: this owner is never enabled
+        }
+        return enabledExpr.empty() ? "false" : "!(" + enabledExpr + ")";
+      }
+      // "up"
+      if (alwaysDisabled && hasDisabled) {
+        return "false";
+      }
+      if (enabledExpr.empty() || !hasDisabled) {
+        return ""; // always — no disabled layer to lose to
+      }
+      return enabledExpr;
+    };
+
     for (const NodePtr &c : n.children) {
       const size_t before = sw.kids.size();
       solveInto(sw.kids, *c, vw, vh, chain);
+      if (c->kind == Node::kWidgetState) {
+        const std::string g = stateGuard(c->tag);
+        if (g == "false") {
+          // statically unreachable: drop the layer rather than emit dead
+          // `if (false)` around it
+          sw.kids.erase(sw.kids.begin() + (long)before, sw.kids.end());
+          continue;
+        }
+        for (size_t k = before; k < sw.kids.size(); ++k) {
+          SolvedW &cw = *sw.kids[k];
+          if (!g.empty()) {
+            cw.guard = cw.guard.empty() ? g : "(" + g + ") && (" + cw.guard + ")";
+          }
+        }
+      }
       for (size_t k = before; k < sw.kids.size(); ++k) {
         const SolvedW &cw = *sw.kids[k];
         const std::string cs = std::to_string(cw.idx);

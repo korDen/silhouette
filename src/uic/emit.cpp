@@ -924,15 +924,19 @@ struct Emit {
   // Resolve `attr: match p { v: path; ... }` — the language's answer to
   // interpolated values. The scrutinee's folded value picks the one arm
   // this instantiation draws. When the attr names an asset, every arm's
-  // path is statically validated (a missing file is a hard error);
-  // a match on any other attr (e.g. `style`) resolves to
-  // a name whose existence its own domain checks.
+  // path is statically validated. This WAS a hard error;
+  // it is a warning now, for the same reason texId's is — a converted
+  // source can name art its own archive never shipped, and the renderer
+  // already makes that loud by sampling magenta. A match arm is the common
+  // case: the art exists for one enum value and not another.
+  // A match on any other attr (e.g. `style`) resolves to a name whose
+  // existence its own domain checks.
   std::string resolveMatch(const Attr &a) {
     if (a.name == "texture" || a.name == "alphamaskfile") {
       for (const MatchArm &arm : a.arms) {
         if (!assetExists(arm.result)) {
-          err(a.line, "match '" + a.name + "' arm '" + arm.value +
-                          "': missing asset " + arm.result);
+          warn(a.line, "match '" + a.name + "' arm '" + arm.value +
+                           "': missing asset " + arm.result);
         }
       }
     }

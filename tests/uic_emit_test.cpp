@@ -57,6 +57,26 @@ TEST(UicEmit, HierWalkCarriesProvenanceAndSharesDraws) {
   EXPECT_NE(hier.find("sink.image("), std::string::npos) << hier;
 }
 
+// A state layer reports its KIND as the tag and its state name as the name.
+// A parity walk joins nodes on (src_path, src_line, tag); every other node
+// kind's tag is the source element's name, so a state reporting "up" instead
+// of "widgetstate" breaks the join and the same node is reported twice, once
+// per side, at identical rects.
+TEST(UicEmit, AStateLayerReportsItsKindNotItsStateName) {
+  std::vector<uic::Diag> diags;
+  const std::string hier = emitHier(
+      "panel { src_path: \"pkg.package\"; src_line: 1;\n"
+      "    button { src_line: 2; texture: $invis;\n"
+      "        widgetstate up { src_line: 3;\n"
+      "            image { src_line: 4; texture: /a.tga; } } } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  EXPECT_NE(hier.find("sink.node(\"pkg.package\", 3, \"widgetstate\", \"up\""),
+            std::string::npos)
+      << hier;
+  EXPECT_EQ(hier.find("\"up\", \"\""), std::string::npos) << hier;
+}
+
 TEST(UicEmit, UnitGrammarFoldsToArithmetic) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

@@ -1954,10 +1954,24 @@ struct Emit {
     }
     // src_path is stored verbatim, already quoted ("..."); src_line is a bare
     // number. tag/name are bare identifiers and need quoting here.
+    //
+    // A WIDGETSTATE'S TAG IS "widgetstate". Every other node kind's `tag`
+    // already IS the source element's name, and a parity diff joins on
+    // (src_path, src_line, tag) — so a state layer reporting "up"/"disabled"
+    // instead breaks the join and the SAME node shows up twice, once from
+    // each side, at identical rects. For kWidgetState the state name lives in
+    // `tag` as the parser's convenient home for it (parse.cpp sets the kind
+    // separately, and print.cpp re-adds the "widgetstate " prefix on the way
+    // out); it is a LABEL, not the kind. Report it as the name so the walk
+    // keeps it without lying about what the node is.
+    const bool isStateLayer = n.kind == Node::kWidgetState;
+    const std::string hierTag = isStateLayer ? "widgetstate" : n.tag;
+    const std::string hierName =
+        isStateLayer ? n.tag : (nm != nullptr ? *nm : std::string());
     const std::string pathLit = path.empty() ? "\"\"" : path;
     drawLine("sink.node(" + pathLit + ", " + (ln != nullptr ? *ln : "0") +
-             ", \"" + n.tag + "\", \"" + (nm != nullptr ? *nm : std::string()) +
-             "\", {" + ax + ", " + ay + ", w" + sfx + ", h" + sfx + "});");
+             ", \"" + hierTag + "\", \"" + hierName + "\", {" + ax + ", " +
+             ay + ", w" + sfx + ", h" + sfx + "});");
     emitDraw(sw, ax, ay, "w" + sfx, "h" + sfx);
     if (sw.reverse) {
       for (auto it = sw.kids.rbegin(); it != sw.kids.rend(); ++it) {

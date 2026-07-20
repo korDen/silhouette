@@ -423,26 +423,43 @@ struct Emit {
            ", " + ftos(c[3]) + "}";
   }
 
-  static std::string upper(const std::string &s) {
-    std::string u = s;
-    for (char &c : u) {
-      c = static_cast<char>(std::toupper((unsigned char)c));
+  // The named id constant for a PARAM inline-enum value: `ident::<value>`,
+  // spelled EXACTLY as the source does, recorded so the file emits one
+  // `inline constexpr uint32_t <value>` per distinct value inside
+  // `namespace ident`.
+  //
+  // The namespace is what makes case significant again. These constants were
+  // once bare UPPER names, which forced two compromises: values had to be
+  // uppercased so they could not shadow the lowercase struct fields, and
+  // matching had to be case-insensitive so the two spellings met. That made
+  // `active` and `Active` — distinct identifiers, from different packages —
+  // impossible to hold at once. Qualified, they are always written
+  // `ident::x`, so they shadow nothing and need no case folding; and being in
+  // their own namespace they cannot collide with the schema's constants
+  // either (the panel header includes it).
+  //
+  // The id is still the byte-wise sid of the exact spelling, so a param
+  // compared against a schema field still agrees with the value the host
+  // populated.
+  std::string enumConst(const std::string &value) {
+    if (!isIdent(value)) {
+      err(0, "enum value '" + value + "' is not a C++ identifier");
+      return "0";
     }
-    return u;
+    enumIds.emplace(value, value);
+    return "ident::" + value;
   }
 
-  // the named id constant for an inline-enum value: its UPPER, recorded so
-  // the file emits `inline constexpr uint32_t NAME = 0x..u;` for it. A value
-  // whose UPPER already stands for a DIFFERENT value collides (as it would
-  // in the schema).
-  std::string enumConst(const std::string &value) {
-    std::string up = upper(value);
-    const auto ins = enumIds.emplace(up, value);
-    if (!ins.second && ins.first->second != value) {
-      err(0, "enum values '" + ins.first->second + "' and '" + value +
-                 "' share the constant '" + up + "'");
+  static bool isIdent(const std::string &s) {
+    if (s.empty() || (std::isalpha((unsigned char)s[0]) == 0 && s[0] != '_')) {
+      return false;
     }
-    return up;
+    for (const char c : s) {
+      if (std::isalnum((unsigned char)c) == 0 && c != '_') {
+        return false;
+      }
+    }
+    return true;
   }
 
   // one operand of an inline-enum comparison: a bare VALUE lowers to its
@@ -453,8 +470,11 @@ struct Emit {
   std::string exprEnum(const Expr &e, const std::vector<std::string> *set) {
     if (e.kind == Expr::kIdent && e.text != "snapshot" &&
         inlineEnumSet(e) == nullptr && substitute(e.text) == e.text) {
+      // EXACT match: the value is spelled the same in .ui source and in a
+      // patch's bind text (both are .ui syntax), so case is significant and
+      // `active` is not `Active`.
       for (const std::string &v : *set) {
-        if (upper(v) == upper(e.text)) {
+        if (v == e.text) {
           return enumConst(v);
         }
       }
@@ -2251,13 +2271,14 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
   // param-only enum (one a codegen pass invents) has no schema home, so this
   // is where its ids live. No sid() call ships — the value is the literal.
   if (!e.enumIds.empty()) {
+    os << "namespace ident {\n";
     for (const auto &nv : e.enumIds) {
       char idbuf[16];
       std::snprintf(idbuf, sizeof idbuf, "0x%08Xu", enumSid(nv.second));
       os << "inline constexpr uint32_t " << nv.first << " = " << idbuf
-         << "; // " << nv.second << "\n";
+         << ";\n";
     }
-    os << "\n";
+    os << "} // namespace ident\n\n";
   }
   if (opt.rectLog) {
     os << "// the rect gate's hook: absolute rect per widget, document "

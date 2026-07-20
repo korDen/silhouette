@@ -607,7 +607,8 @@ TEST(UicEmit, AColourBindPaintsFromAParamOrAColourLiteral) {
   // the label's text paint is the whole ternary: the condition lowered to
   // sids, `color` folded to the instance's ui::Color, color(...) built from
   // exprs — and NOT the static unbound grey
-  EXPECT_NE(h.find("(WARM == WARM) ? ui::Color{1.0f, "), std::string::npos);
+  EXPECT_NE(h.find("(ident::warm == ident::warm) ? ui::Color{1.0f, "),
+            std::string::npos);
   EXPECT_NE(h.find(": ui::Color{(float)(0.9), (float)(0.9), (float)(0.9), "
                    "(float)(1)}"),
             std::string::npos);
@@ -651,10 +652,10 @@ TEST(UicEmit, AMatchInABindLowersToAConvertedTernary) {
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   EXPECT_NE(h.find("gen_detail::num("), std::string::npos);   // the conv
-  EXPECT_NE(h.find("(A == A)"), std::string::npos);           // first arm
-  EXPECT_NE(h.find("(A == B)"), std::string::npos);           // second arm
+  EXPECT_NE(h.find("(ident::a == ident::a)"), std::string::npos); // first arm
+  EXPECT_NE(h.find("(ident::a == ident::b)"), std::string::npos); // second arm
   EXPECT_NE(h.find("s.unit.high"), std::string::npos); // else, no cond
-  EXPECT_EQ(h.find("A == C"), std::string::npos); // the else has no compare
+  EXPECT_EQ(h.find("ident::a == ident::c"), std::string::npos); // else: no cond
 }
 
 TEST(UicEmit, AMatchOverANumberNeedsNoConversion) {
@@ -675,11 +676,10 @@ TEST(UicEmit, AMatchOverANumberNeedsNoConversion) {
 }
 
 TEST(UicEmit, AnInlineEnumComparisonLowersToNamedIds) {
-  // an inline-enum param and a bare value both become a named UPPER id
-  // constant in a bind — a uint32_t compare that folds at compile time (no
-  // shared type). The generated file DEFINES the constant it uses (a
-  // param-only enum, round|square here, has no schema home), so it compiles
-  // stand-alone with the id folded to its literal.
+  // an inline-enum param and a bare value both become a named id constant in
+  // a bind — a uint32_t compare that folds at compile time (no shared type).
+  // The generated file DEFINES the constant it uses (a param-only enum,
+  // round|square here, has no schema home), so it compiles stand-alone.
   std::vector<uic::Diag> diags;
   const std::string h = emit("template slot { in shape: round | square;\n"
                              "    image { texture: /art/x.tga;\n"
@@ -687,8 +687,45 @@ TEST(UicEmit, AnInlineEnumComparisonLowersToNamedIds) {
                              "panel { slot { shape: square; } }\n",
                              &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  EXPECT_NE(h.find("SQUARE == SQUARE"), std::string::npos);
-  EXPECT_NE(h.find("inline constexpr uint32_t SQUARE = 0x"), std::string::npos);
+  EXPECT_NE(h.find("ident::square == ident::square"), std::string::npos) << h;
+  EXPECT_NE(h.find("namespace ident {"), std::string::npos) << h;
+  EXPECT_NE(h.find("inline constexpr uint32_t square = 0x"), std::string::npos)
+      << h;
+}
+
+// CASE IS SIGNIFICANT. The constants are qualified (`ident::x`), so they
+// shadow nothing and need no uppercasing — which means two values differing
+// only in case are two values, and can coexist. They used to collide on one
+// UPPER name, so a package spelling a value `Active` and another spelling it
+// `active` could not both be compiled.
+TEST(UicEmit, CaseDistinctEnumValuesCoexist) {
+  std::vector<uic::Diag> diags;
+  const std::string h =
+      emit("template a { in k: Active | Selected;\n"
+           "    image { texture: /art/x.tga; bind visible: k == Active; } }\n"
+           "template b { in k: active | selected;\n"
+           "    image { texture: /art/y.tga; bind visible: k == active; } }\n"
+           "panel { a { k: Active; } b { k: active; } }\n",
+           &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("ident::Active == ident::Active"), std::string::npos) << h;
+  EXPECT_NE(h.find("ident::active == ident::active"), std::string::npos) << h;
+  // two distinct constants, two distinct ids
+  EXPECT_NE(h.find("inline constexpr uint32_t Active = 0x"), std::string::npos);
+  EXPECT_NE(h.find("inline constexpr uint32_t active = 0x"), std::string::npos);
+}
+
+// ...and a mismatched spelling is no longer quietly accepted: matching is
+// exact, so `SQUARE` is not `square`.
+TEST(UicEmit, AMisspelledEnumValueIsLoud) {
+  std::vector<uic::Diag> diags;
+  emit("template slot { in shape: round | square;\n"
+       "    image { texture: /art/x.tga; bind visible: shape == SQUARE; } }\n"
+       "panel { slot { shape: square; } }\n",
+       &diags);
+  ASSERT_FALSE(diags.empty());
+  EXPECT_NE(diags[0].msg.find("not a value of this enum"), std::string::npos)
+      << diags[0].msg;
 }
 
 TEST(UicEmit, ATextTernaryCoercesEachBranchToAView) {

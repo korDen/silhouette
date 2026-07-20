@@ -524,6 +524,20 @@ struct Emit {
         return "gen_detail::fracf((float)(" + expr(*e.args[1]) +
                "), (float)(" + expr(*e.args[2]) + "))";
       }
+      // max(a, b) — the larger of two values of the SAME type. Its reason to
+      // exist is that integer division truncates toward zero while a floor
+      // rounds down: the two agree only on non-negative values, so clamping a
+      // span at 0 before dividing is what makes `/` mean floor. Written as a
+      // call rather than a ternary because the alternative repeats the
+      // operands, and a repeated operand is where the two arms drift apart.
+      if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "max") {
+        if (e.args.size() != 3) {
+          err(e.line, "max takes (a, b)");
+          return "0";
+        }
+        return "gen_detail::maxOf(" + expr(*e.args[1]) + ", " +
+               expr(*e.args[2]) + ")";
+      }
       // the typed conversions at a text sink (no interpolation in the
       // language — these are calls, and their result IS a run)
       if (e.args[0]->kind == Expr::kIdent && e.args[0]->text == "num") {
@@ -592,7 +606,7 @@ struct Emit {
         return out + ")";
       }
       err(e.line,
-          "call in bind (subset builtins: fracf, num, fixed, ord, fmt)");
+          "call in bind (subset builtins: fracf, max, num, fixed, ord, fmt)");
       return "0";
     case Expr::kUnary:
       return "(" + e.text + expr(*e.args[0]) + ")";
@@ -2176,6 +2190,11 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "inline float R(float f) { return std::floor(f + 0.5f); }\n"
      << "inline float fracf(float a, float b) { return b > 0 ? a / b : 0; "
         "}\n"
+     << "// max(a, b): same-typed, so an integer clamp stays integral and\n"
+     << "// `/` on the result means floor (truncation and floor agree once\n"
+     << "// the value cannot be negative)\n"
+     << "template <class T> constexpr T maxOf(T a, T b) { return a < b ? b "
+        ": a; }\n"
      << "// a text run's source: a schema char array is a run up to its\n"
      << "// first NUL; a string_view is itself. Borrowed for the call\n"
      << "// only — the Sink's string-lifetime contract.\n"

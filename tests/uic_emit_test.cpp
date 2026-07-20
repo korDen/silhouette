@@ -159,6 +159,32 @@ TEST(UicEmit, ModuloTranspiles) {
   EXPECT_NE(h.find("(s.unit.hp / 60)"), std::string::npos) << h;
 }
 
+// max(a, b) exists so that a span can be clamped before it is divided.
+// Integer '/' truncates toward zero and a floor rounds down; they agree only
+// on non-negative values, so `max(x, 0) / n` is a floor while `x / n` is not.
+// Same-typed, so an integer clamp stays integral.
+TEST(UicEmit, MaxClampsBeforeDivision) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { label { bind content:\n"
+      "    num(max(snapshot.unit.hp - snapshot.unit.hpMax, 0) / 60); } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("gen_detail::maxOf((s.unit.hp - s.unit.hpMax), 0)"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("template <class T> constexpr T maxOf"), std::string::npos);
+}
+
+TEST(UicEmit, MaxArityIsLoud) {
+  std::vector<uic::Diag> diags;
+  emit("panel { label { bind content: num(max(snapshot.unit.hp)); } }\n",
+       &diags);
+  ASSERT_FALSE(diags.empty());
+  EXPECT_NE(diags[0].msg.find("max takes (a, b)"), std::string::npos)
+      << diags[0].msg;
+}
+
 TEST(UicEmit, ManifestCarriesIdsAndPaths) {
   std::vector<uic::Diag> diags;
   const std::string h =

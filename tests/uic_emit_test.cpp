@@ -77,6 +77,49 @@ TEST(UicEmit, AStateLayerReportsItsKindNotItsStateName) {
   EXPECT_EQ(hier.find("\"up\", \"\""), std::string::npos) << hier;
 }
 
+// A bind expression takes a HEX COLOUR literal, so a converted tree
+// can write a source hex spelling verbatim instead of hand-dividing
+// it into /255 components.
+TEST(UicEmit, AHexColourIsABindLiteral) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { image { texture: /a.tga;\n"
+      "    bind color: snapshot.unit.dead ? #dae2ff : #ffffff; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // #dae2ff = 218,226,255 / 255 -> 0.8549..., 0.8862..., 1
+  EXPECT_NE(h.find("ui::Color{0.85"), std::string::npos) << h;
+  EXPECT_NE(h.find("ui::Color{1.0f, 1.0f, 1.0f"), std::string::npos) << h;
+}
+
+// `rendermode` is bindable. The mode names are not values the expression
+// grammar knows, so they are lowered inside a rendermode bind — the one
+// context where they mean something — and the result is a flags expression
+// that drops straight into the draw.
+TEST(UicEmit, RenderModeIsBindable) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { image { texture: /a.tga;\n"
+      "    bind rendermode: snapshot.unit.dead ? grayscale : normal; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("(s.unit.dead ? ui::kGrayscale : 0)"), std::string::npos)
+      << h;
+}
+
+// (A static `rendermode` attr alongside the bind cannot arise: setting a
+// target twice is already a parse error — UicParse.ATargetSetTwiceIsLoud —
+// since a bind REPLACES the attribute it targets.)
+
+TEST(UicEmit, AnUnknownRenderModeIsLoud) {
+  std::vector<uic::Diag> diags;
+  emit("panel { image { texture: /a.tga; bind rendermode: sideways; } }\n",
+       &diags);
+  ASSERT_FALSE(diags.empty());
+  EXPECT_NE(diags[0].msg.find("is not a rendermode"), std::string::npos)
+      << diags[0].msg;
+}
+
 TEST(UicEmit, UnitGrammarFoldsToArithmetic) {
   std::vector<uic::Diag> diags;
   const std::string h = emit(

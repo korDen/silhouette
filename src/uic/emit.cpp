@@ -1333,8 +1333,9 @@ struct Emit {
     // transpile binds NOW — the instantiation's param environment is
     // gone by draw time
     for (const Bind &b : n.binds) {
-      sw.binds[b.target] =
-          b.target == "content" ? textBind(*b.expr) : expr(*b.expr);
+      sw.binds[b.target] = b.target == "content"  ? textBind(*b.expr)
+                           : b.target == "rendermode" ? renderModeBind(*b.expr)
+                                                      : expr(*b.expr);
     }
     out.push_back(&sw);
 
@@ -2009,9 +2010,49 @@ struct Emit {
   // the sink flags a widget's rendermode/tiling imply — the blend/grayscale
   // bits (rendermode="overlay"|"additive"|"grayscale") plus U/V tiling.
   // uscale/hflip stay UV-side, so they are not here.
-  std::string renderFlags(const std::map<std::string, std::string> &bag) {
+  // A BOUND rendermode. The mode names are not values the expression grammar
+  // knows, so they are lowered here, in the one context where they mean
+  // something: inside a `rendermode` bind, the bare identifiers normal /
+  // grayscale / additive / overlay become their flag constants, and the
+  // surrounding expression (typically a ternary on the snapshot) transpiles
+  // as usual. The result IS a flags expression, so it drops straight into the
+  // draw's flags argument.
+  std::string renderModeBind(const Expr &e) {
+    if (e.kind == Expr::kIdent) {
+      if (e.text == "normal") {
+        return "0";
+      }
+      if (e.text == "grayscale") {
+        return "ui::kGrayscale";
+      }
+      if (e.text == "additive") {
+        return "ui::kBlendAdditive";
+      }
+      if (e.text == "overlay") {
+        return "ui::kBlendOverlay";
+      }
+      err(e.line, "'" + e.text +
+                      "' is not a rendermode (normal|grayscale|additive|"
+                      "overlay)");
+      return "0";
+    }
+    if (e.kind == Expr::kTernary) {
+      return "(" + expr(*e.args[0]) + " ? " + renderModeBind(*e.args[1]) +
+             " : " + renderModeBind(*e.args[2]) + ")";
+    }
+    err(e.line, "a rendermode bind is a mode name, or a ternary of them");
+    return "0";
+  }
+
+  std::string renderFlags(const std::map<std::string, std::string> &bag,
+                          const SolvedW *sw = nullptr) {
     std::vector<std::string> fs;
-    if (const std::string *rm = get(bag, "rendermode")) {
+    // a BOUND rendermode wins over the static attr: it already transpiled to
+    // a flags expression (renderModeBind)
+    const std::string *bound = sw != nullptr ? get(sw->binds, "rendermode") : nullptr;
+    if (bound != nullptr) {
+      fs.push_back(*bound);
+    } else if (const std::string *rm = get(bag, "rendermode")) {
       if (*rm == "additive") {
         fs.push_back("ui::kBlendAdditive");
       } else if (*rm == "overlay") {
@@ -2100,7 +2141,7 @@ struct Emit {
       } kPieces[9] = {{"_c", 1, 1},  {"_bl", 0, 2}, {"_b", 1, 2},
                       {"_br", 2, 2}, {"_l", 0, 1},  {"_r", 2, 1},
                       {"_tl", 0, 0}, {"_t", 1, 0},  {"_tr", 2, 0}};
-      const std::string fflags = renderFlags(bag);
+      const std::string fflags = renderFlags(bag, &sw);
       drawLine("{");
       ++drawIndent;
       drawLine("const float bt = std::min(" + btE + ", std::min(" + w +
@@ -2157,7 +2198,7 @@ struct Emit {
         idExpr = texIdExpr(path, n.line);
       }
       std::string uv = "{0, 0, 1, 1}";
-      const std::string flags = renderFlags(bag);
+      const std::string flags = renderFlags(bag, &sw);
       if (const std::string *us = get(bag, "uscale")) {
         const float span = 1.f / std::strtof(us->c_str(), nullptr);
         uv = "{0, 0, " + ftos(span) + ", 1}";
@@ -2178,7 +2219,7 @@ struct Emit {
       const float def = tex != nullptr && *tex == "$black" ? 0.0f : 1.0f;
       const std::string col = colorLiteral(sw, def);
       const std::string mask = maskOf(bag, n.line);
-      const std::string flags = renderFlags(bag);
+      const std::string flags = renderFlags(bag, &sw);
       // a fully transparent widget issues no draw
       if (mask != "0") {
         drawLine("if ((" + col + ").a > 0) sink.image(" + dst +

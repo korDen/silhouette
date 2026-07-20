@@ -54,6 +54,9 @@ enum class Tok {
   kMinus,
   kStar,
   kSlash,
+  kPercent, // modulo — a dim's '%' suffix is consumed by lexNumberOrDim
+            // before it can reach the punctuation dispatch, so `100%` stays
+            // a dim while `a % b` (and `7%3`, un-glued) is the operator
   kLt,
   kGt,
   kLe,
@@ -208,6 +211,9 @@ private:
       break;
     case '/':
       t.kind = Tok::kSlash;
+      break;
+    case '%':
+      t.kind = Tok::kPercent;
       break;
     case '!':
       two('=', Tok::kNe, Tok::kBang);

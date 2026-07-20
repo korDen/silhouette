@@ -98,6 +98,25 @@ TEST(UicParse, SlashIsDivisionAfterOperandPathOtherwise) {
             std::string::npos);
 }
 
+// '%' is overloaded: a dim's suffix and modulo. lexNumberOrDim takes the
+// suffix only when it is GLUED to its digits AND not followed by more of a
+// word, so `100%` is a dimension, `7%3` is modulo (the '3' un-glues it), and
+// a spaced `%` is always the operator. It sits with * and / in the ladder.
+TEST(UicParse, PercentIsModuloUnlessItSuffixesADim) {
+  const std::string d = dumpOf(
+      "fn secs(t: int) -> int = t % 60;\n"
+      "fn mixed(t: int) -> int = t % 60 + t / 60 * 2;\n"
+      "fn glued() -> int = 7%3;\n"
+      "panel { width: 100%; height: 50%; }\n");
+  EXPECT_NE(d.find("= (% t 60)"), std::string::npos) << d;
+  // multiplicative binds tighter than additive on both sides
+  EXPECT_NE(d.find("= (+ (% t 60) (* (/ t 60) 2))"), std::string::npos) << d;
+  EXPECT_NE(d.find("= (% 7 3)"), std::string::npos) << d;
+  // and the dim suffix is untouched
+  EXPECT_NE(d.find("attr width=`100%`"), std::string::npos) << d;
+  EXPECT_NE(d.find("attr height=`50%`"), std::string::npos) << d;
+}
+
 TEST(UicParse, DimLiteralsInExpressions) {
   const std::string d = dumpOf("fn wide(x: dim) -> dim = x + 12.1h;\n"
                                "fn neg() -> dim = -0.7h;\n");

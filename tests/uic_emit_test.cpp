@@ -141,6 +141,24 @@ TEST(UicEmit, SnapshotBindsTranspile) {
   EXPECT_NE(h.find("s.unit.icon"), std::string::npos);
 }
 
+// '%' is modulo at multiplicative precedence and transpiles to C++ '%'
+// verbatim, so an integer snapshot field can be split into fields (the
+// mm:ss shape) without a division-identity workaround. It shares the
+// integer-only restriction of C++ '%': a float operand is a compile error
+// in the generated header, which is where it belongs.
+TEST(UicEmit, ModuloTranspiles) {
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 100%;\n"
+      "    label { bind content: fmt(\"{}:{:02}\",\n"
+      "                snapshot.unit.hp / 60, snapshot.unit.hp % 60); }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("(s.unit.hp % 60)"), std::string::npos) << h;
+  EXPECT_NE(h.find("(s.unit.hp / 60)"), std::string::npos) << h;
+}
+
 TEST(UicEmit, ManifestCarriesIdsAndPaths) {
   std::vector<uic::Diag> diags;
   const std::string h =

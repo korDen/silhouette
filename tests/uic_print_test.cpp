@@ -187,4 +187,25 @@ TEST(UicPrint, ExpressionParensFollowPrecedence) {
       << printed;
 }
 
+// '%' is both a dim suffix and modulo. lexNumberOrDim consumes the suffix
+// only when it is GLUED to its digits and not followed by more of a word, so
+// `100%` stays a dimension and every other shape is the operator. It binds
+// at multiplicative precedence, so a following '+' takes parens and a
+// following '*' does not.
+TEST(UicPrint, ModuloDoesNotStealTheDimSuffix) {
+  constexpr char kSrc[] =
+      "panel { width: 100%; bind height: a % b; bind x: (a + b) % c;\n"
+      "        bind y: a % b + c; bind alpha: a % b * c; }\n";
+  std::vector<uic::Diag> d;
+  const uic::Module m = uic::parseModule(kSrc, "e.ui", d);
+  ASSERT_FALSE(uic::hasErrors(d)) << (d.empty() ? "" : d[0].msg);
+  const std::string printed = uic::printModule(m);
+  EXPECT_NE(printed.find("width: 100%;"), std::string::npos) << printed;
+  EXPECT_NE(printed.find("bind height: a % b;"), std::string::npos) << printed;
+  EXPECT_NE(printed.find("bind x: (a + b) % c;"), std::string::npos) << printed;
+  EXPECT_NE(printed.find("bind y: a % b + c;"), std::string::npos) << printed;
+  EXPECT_NE(printed.find("bind alpha: a % b * c;"), std::string::npos)
+      << printed;
+}
+
 } // namespace

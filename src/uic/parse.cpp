@@ -983,7 +983,7 @@ private:
   }
   ExprPtr parseMultiplicative() {
     return parseBinaryChain(&Parser::parseUnary,
-                            {Tok::kStar, Tok::kSlash});
+                            {Tok::kStar, Tok::kSlash, Tok::kPercent});
   }
 
   ExprPtr parseUnary() {

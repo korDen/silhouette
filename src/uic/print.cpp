@@ -14,8 +14,8 @@ namespace uic {
 namespace {
 
 // expression precedence, mirroring the parser's ladder: ternary(0) <
-// || < && < ==/!= < relational < additive < multiplicative < unary <
-// postfix
+// || < && < ==/!= < relational < additive < multiplicative(* / %) <
+// unary < postfix
 int precOf(const Expr &e) {
   switch (e.kind) {
   case Expr::kTernary:
@@ -36,7 +36,7 @@ int precOf(const Expr &e) {
     if (e.text == "+" || e.text == "-") {
       return 5;
     }
-    return 6; // * /
+    return 6; // * / %
   case Expr::kUnary:
     return 7;
   default:

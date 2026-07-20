@@ -18,6 +18,7 @@ int main(int argc, char **argv) {
   std::string emitOut;
   std::string hierOut;
   std::string assetRoot;
+  std::string missingAssetsFile;
   std::string schemaInclude = "schema.h"; // caller passes the real path
   std::string ns = "hud";
   std::vector<std::string> files;
@@ -41,6 +42,11 @@ int main(int argc, char **argv) {
       hierOut = next();
     } else if (std::strcmp(argv[i], "--assets") == 0) {
       assetRoot = next();
+      // one asset path per line; '#' starts a comment. A missing file is a
+      // hard error — this is the only way to accept one, and every entry
+      // has to be written down (and justified) by hand.
+    } else if (std::strcmp(argv[i], "--missing-assets") == 0) {
+      missingAssetsFile = next();
     } else if (std::strcmp(argv[i], "--styles") == 0) {
       styleFiles.emplace_back(next());
     } else if (std::strcmp(argv[i], "--with") == 0) {
@@ -121,6 +127,26 @@ int main(int argc, char **argv) {
       opt.ns = ns;
       opt.schemaInclude = schemaInclude;
       opt.assetRoot = assetRoot;
+      if (!missingAssetsFile.empty()) {
+        std::ifstream mf(missingAssetsFile);
+        if (!mf) {
+          std::fprintf(stderr, "cannot open %s\n", missingAssetsFile.c_str());
+          return 2;
+        }
+        std::string line;
+        while (std::getline(mf, line)) {
+          const size_t hash = line.find('#');
+          if (hash != std::string::npos) {
+            line = line.substr(0, hash);
+          }
+          const size_t b = line.find_first_not_of(" \t\r");
+          if (b == std::string::npos) {
+            continue;
+          }
+          const size_t e = line.find_last_not_of(" \t\r");
+          opt.allowedMissingAssets.insert(line.substr(b, e - b + 1));
+        }
+      }
       opt.rectLog = rectLog;
       // side modules (--styles/--with): parsed once, owned here for
       // the emit's duration

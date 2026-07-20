@@ -351,17 +351,27 @@ struct Emit {
     return false;
   }
 
+  // is this path a written-down exception? (see EmitOptions)
+  bool allowedMissing(const std::string &path) const {
+    return opt.allowedMissingAssets.count(path) != 0;
+  }
+
+  // an exception for art that is actually there is stale — loud, so the
+  // list cannot rot into a blanket permission
+  void checkStaleMissingAssetExceptions() {
+    for (const std::string &p : opt.allowedMissingAssets) {
+      if (assetExists(p)) {
+        err(0, "stale missing-asset exception: '" + p +
+                   "' exists — remove it from the exceptions");
+      }
+    }
+  }
+
   uint32_t texId(const std::string &path, int atLine) {
-    if (!assetExists(path)) {
-      // A WARNING, not an error. A hand-written .ui naming art that is not
-      // there is a typo — but a MACHINE-CONVERTED source can legitimately
-      // reference art its own archive does not ship (a widget state whose
-      // art was never made, say), and refusing to compile means the pipeline
-      // cannot represent the real data at all. The renderer already models
-      // this and models it LOUDLY: an id with no pixels registered samples
-      // magenta (quality_raster.cpp:332), so a missing asset is impossible
-      // to miss on screen rather than impossible to build.
-      warn(atLine, "missing asset: " + path);
+    if (!assetExists(path) && !allowedMissing(path)) {
+      err(atLine, "missing asset: " + path +
+                      " (add it to the missing-asset exceptions if the "
+                      "archive genuinely does not ship it)");
     }
     auto it = texIds.find(path);
     if (it != texIds.end()) {
@@ -924,19 +934,20 @@ struct Emit {
   // Resolve `attr: match p { v: path; ... }` — the language's answer to
   // interpolated values. The scrutinee's folded value picks the one arm
   // this instantiation draws. When the attr names an asset, every arm's
-  // path is statically validated. This WAS a hard error;
-  // it is a warning now, for the same reason texId's is — a converted
-  // source can name art its own archive never shipped, and the renderer
-  // already makes that loud by sampling magenta. A match arm is the common
-  // case: the art exists for one enum value and not another.
-  // A match on any other attr (e.g. `style`) resolves to a name whose
-  // existence its own domain checks.
+  // path is statically validated (a missing file is a hard error;
+  // the only way to accept one is the missing-asset
+  // exception list, which has to be written down). A match arm is the
+  // common case for an exception: the art exists for one enum value of a
+  // shape and not another. A match on any other attr (e.g. `style`)
+  // resolves to a name whose existence its own domain checks.
   std::string resolveMatch(const Attr &a) {
     if (a.name == "texture" || a.name == "alphamaskfile") {
       for (const MatchArm &arm : a.arms) {
-        if (!assetExists(arm.result)) {
-          warn(a.line, "match '" + a.name + "' arm '" + arm.value +
-                           "': missing asset " + arm.result);
+        if (!assetExists(arm.result) && !allowedMissing(arm.result)) {
+          err(a.line, "match '" + a.name + "' arm '" + arm.value +
+                          "': missing asset " + arm.result +
+                          " (add it to the missing-asset exceptions if the "
+                          "archive genuinely does not ship it)");
         }
       }
     }
@@ -2218,6 +2229,11 @@ struct Emit {
   }
 
   void run() {
+    // The exception list is kept honest from BOTH ends: a missing asset that
+    // is not listed is an error (texId/resolveMatch), and a listed asset that
+    // turns out to exist is an error too — otherwise an exception outlives
+    // the gap it was written for and quietly stops meaning anything.
+    checkStaleMissingAssetExceptions();
     registerModule(m);
     for (const Module *sm : opt.styleModules) {
       registerModule(*sm);

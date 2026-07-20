@@ -4,6 +4,7 @@
 // part of the library build.
 #include "uic/ast.hpp"
 
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,6 +60,16 @@ struct EmitOptions {
   std::string ns = "hud";
   std::string schemaInclude = "schema.h"; // caller passes the real path
   std::string assetRoot; // empty = skip validation
+  // Art the asset tree is KNOWN not to carry. A missing file is a hard
+  // error; this is the only way to accept one, and it has to be written
+  // down deliberately. A converted source can name art its archive never
+  // shipped (a widget state nobody drew), and that fact belongs in a
+  // reviewable list rather than in a warning nobody reads.
+  //
+  // The list is kept honest from both ends: a missing asset NOT listed is
+  // an error, and a listed asset that DOES exist is also an error, so an
+  // exception cannot outlive the gap it was written for.
+  std::set<std::string> allowedMissingAssets;
   bool rectLog = false;  // emit the rect-gate hook (RectLog parameter)
   // styles, templates, and asset consts resolve from the module itself
   // plus these (parsed modules, caller-owned): --styles/--with

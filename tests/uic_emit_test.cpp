@@ -6,6 +6,9 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+
 namespace {
 
 std::string emit(std::string_view src, std::vector<uic::Diag> *diags) {
@@ -236,12 +239,12 @@ TEST(UicEmit, TheRestingStateShowsWhenThereIsNoDisabledLayer) {
   EXPECT_EQ(h.find("if ((s.unit.hp > 0))"), std::string::npos) << h;
 }
 
-// Art the asset tree does not carry is a WARNING, and the draw still emits.
-// A converted source legitimately references art its own archive never
-// shipped, and refusing to compile would mean the pipeline cannot represent
-// the real data; the renderer already makes it loud by sampling magenta for
-// an id with no pixels.
-TEST(UicEmit, MissingArtWarnsAndStillEmits) {
+
+// Missing art is a HARD ERROR. The only way to accept one is to write it
+// down in the exception list — a converted source can name art its archive
+// never shipped, but that has to be a deliberate, reviewable entry rather
+// than a warning nobody reads.
+TEST(UicEmit, MissingArtIsAnError) {
   std::vector<uic::Diag> parseDiags;
   const uic::Module m = uic::parseModule(
       "panel { image { texture: /art/nope.img; } }\n", "panel.ui", parseDiags);
@@ -249,12 +252,50 @@ TEST(UicEmit, MissingArtWarnsAndStillEmits) {
   uic::EmitOptions opt;
   opt.assetRoot = "."; // a real root, so the check actually runs
   std::vector<uic::Diag> diags;
-  const std::string h = uic::emitPanelHeader(m, opt, diags);
-  EXPECT_FALSE(uic::hasErrors(diags)) << "missing art must not be fatal";
+  uic::emitPanelHeader(m, opt, diags);
+  EXPECT_TRUE(uic::hasErrors(diags));
   ASSERT_FALSE(diags.empty());
-  EXPECT_EQ(diags[0].severity, uic::Diag::Severity::kWarning);
-  EXPECT_NE(diags[0].msg.find("missing asset"), std::string::npos);
+  EXPECT_NE(diags[0].msg.find("missing asset"), std::string::npos)
+      << diags[0].msg;
+}
+
+TEST(UicEmit, AListedMissingAssetIsAccepted) {
+  std::vector<uic::Diag> parseDiags;
+  const uic::Module m = uic::parseModule(
+      "panel { image { texture: /art/nope.img; } }\n", "panel.ui", parseDiags);
+  ASSERT_TRUE(parseDiags.empty());
+  uic::EmitOptions opt;
+  opt.assetRoot = ".";
+  opt.allowedMissingAssets = {"/art/nope.img"};
+  std::vector<uic::Diag> diags;
+  const std::string h = uic::emitPanelHeader(m, opt, diags);
+  EXPECT_FALSE(uic::hasErrors(diags)) << (diags.empty() ? "" : diags[0].msg);
   EXPECT_NE(h.find("sink.image("), std::string::npos) << h;
+}
+
+// ...and the list is honest from the other end too: an exception for art
+// that IS there is stale, and a stale exception rots into blanket permission.
+TEST(UicEmit, AStaleMissingAssetExceptionIsAnError) {
+  // an asset that genuinely exists, made here so the test does not depend on
+  // the working directory
+  const std::filesystem::path root =
+      std::filesystem::temp_directory_path() / "uic_stale_asset_test";
+  std::filesystem::create_directories(root);
+  { std::ofstream(root / "there.img") << "x"; }
+
+  std::vector<uic::Diag> parseDiags;
+  const uic::Module m = uic::parseModule("panel { }\n", "panel.ui", parseDiags);
+  ASSERT_TRUE(parseDiags.empty());
+  uic::EmitOptions opt;
+  opt.assetRoot = root.string();
+  opt.allowedMissingAssets = {"/there.img"};
+  std::vector<uic::Diag> diags;
+  uic::emitPanelHeader(m, opt, diags);
+  EXPECT_TRUE(uic::hasErrors(diags));
+  ASSERT_FALSE(diags.empty());
+  EXPECT_NE(diags[0].msg.find("stale missing-asset exception"),
+            std::string::npos)
+      << diags[0].msg;
 }
 
 TEST(UicEmit, ManifestCarriesIdsAndPaths) {

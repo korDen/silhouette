@@ -313,6 +313,10 @@ struct Emit {
     diags.push_back({m.name, line, 0, std::move(msg),
                      Diag::Severity::kError});
   }
+  void warn(int line, std::string msg) {
+    diags.push_back({m.name, line, 0, std::move(msg),
+                     Diag::Severity::kWarning});
+  }
   void skip(int atLine, const std::string &what) {
     diags.push_back({m.name, atLine, 0,
                      "skipped (unsupported yet): " + what,
@@ -349,7 +353,15 @@ struct Emit {
 
   uint32_t texId(const std::string &path, int atLine) {
     if (!assetExists(path)) {
-      err(atLine, "missing asset: " + path);
+      // A WARNING, not an error. A hand-written .ui naming art that is not
+      // there is a typo — but a MACHINE-CONVERTED source can legitimately
+      // reference art its own archive does not ship (a widget state whose
+      // art was never made, say), and refusing to compile means the pipeline
+      // cannot represent the real data at all. The renderer already models
+      // this and models it LOUDLY: an id with no pixels registered samples
+      // magenta (quality_raster.cpp:332), so a missing asset is impossible
+      // to miss on screen rather than impossible to build.
+      warn(atLine, "missing asset: " + path);
     }
     auto it = texIds.find(path);
     if (it != texIds.end()) {

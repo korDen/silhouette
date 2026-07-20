@@ -236,6 +236,27 @@ TEST(UicEmit, TheRestingStateShowsWhenThereIsNoDisabledLayer) {
   EXPECT_EQ(h.find("if ((s.unit.hp > 0))"), std::string::npos) << h;
 }
 
+// Art the asset tree does not carry is a WARNING, and the draw still emits.
+// A converted source legitimately references art its own archive never
+// shipped, and refusing to compile would mean the pipeline cannot represent
+// the real data; the renderer already makes it loud by sampling magenta for
+// an id with no pixels.
+TEST(UicEmit, MissingArtWarnsAndStillEmits) {
+  std::vector<uic::Diag> parseDiags;
+  const uic::Module m = uic::parseModule(
+      "panel { image { texture: /art/nope.img; } }\n", "panel.ui", parseDiags);
+  ASSERT_TRUE(parseDiags.empty());
+  uic::EmitOptions opt;
+  opt.assetRoot = "."; // a real root, so the check actually runs
+  std::vector<uic::Diag> diags;
+  const std::string h = uic::emitPanelHeader(m, opt, diags);
+  EXPECT_FALSE(uic::hasErrors(diags)) << "missing art must not be fatal";
+  ASSERT_FALSE(diags.empty());
+  EXPECT_EQ(diags[0].severity, uic::Diag::Severity::kWarning);
+  EXPECT_NE(diags[0].msg.find("missing asset"), std::string::npos);
+  EXPECT_NE(h.find("sink.image("), std::string::npos) << h;
+}
+
 TEST(UicEmit, ManifestCarriesIdsAndPaths) {
   std::vector<uic::Diag> diags;
   const std::string h =

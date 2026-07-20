@@ -1659,6 +1659,15 @@ struct Emit {
     const std::string col = colorLiteral(sw, 0.5f);
     const bool outline = flag(bag, "outline", false);
     const bool shadow = !outline && flag(bag, "shadow", false);
+    // AN EMPTY RUN IS NO DRAW. A bound content is empty whenever the value
+    // behind it is (an unset field, a cleared string), and the reference
+    // renderers emit per-glyph work — no glyphs, no commands. Emitting them
+    // anyway paints the same nothing but makes the command stream disagree,
+    // and costs a sink call per hidden label every frame. The measure above
+    // stays outside the guard: a fitx label's width is 0-plus-padding, which
+    // the solve still needs.
+    drawLine("if (!" + text + ".empty()) {");
+    ++drawIndent;
     if (outline || shadow) {
       const std::string *offAttr =
           get(bag, outline ? "outlineoffset" : "shadowoffset");
@@ -1695,6 +1704,8 @@ struct Emit {
     }
     drawLine("sink.text(pen" + sfx + ", " + text + ", " + font + ", " + col +
              ", ui::kNoClip);");
+    --drawIndent;
+    drawLine("}");
   }
 
   void solveChildren(SolvedW &sw, const std::string &vw,

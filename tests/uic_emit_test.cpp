@@ -682,6 +682,30 @@ TEST(UicEmit, LabelsDrawRunsAndTheManifestNamesTheirFonts) {
             std::string::npos);
 }
 
+TEST(UicEmit, AnEmptyRunDrawsNothing) {
+  // no glyphs, no commands: the draw pass is guarded on the run, so a label
+  // whose bound value is empty emits no text (and no shadow pass) at all.
+  // The MEASURE stays unguarded — a fitx label still sizes to 0 + padding.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h;\n"
+      "    label { content: \"x\"; font: dyn_9; shadow: 1; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  const size_t measure = h.find("tw1 = sink.measure(");
+  const size_t guard = h.find("if (!gen_detail::sv(src1).empty()) {");
+  const size_t draw = h.find("sink.text(pen1,");
+  ASSERT_NE(measure, std::string::npos);
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(draw, std::string::npos);
+  EXPECT_LT(measure, guard); // measured outside
+  EXPECT_LT(guard, draw);    // drawn inside
+  // the shadow pass is inside the same guard, not a second one
+  EXPECT_EQ(h.find("if (!gen_detail::sv(src1).empty()) {", guard + 1),
+            std::string::npos);
+}
+
 TEST(UicEmit, FitxLabelsMeasureInTheSolve) {
   // the fitx solve: a fitx label's WIDTH is its text —
   // layout asks the sink, so the solve carries the measure

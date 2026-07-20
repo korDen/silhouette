@@ -2000,14 +2000,18 @@ struct Emit {
     }
   }
 
-  std::string colorLiteral(const SolvedW &sw, float def) {
+  // `key` names WHICH colour: a widget's own `color`, or a frame's
+  // `bordercolor` for its ring. Both can be bound or static, and both parse
+  // the same way.
+  std::string colorLiteral(const SolvedW &sw, float def,
+                           const char *key = "color") {
     // a bound colour wins over the static attr: the transpiled expr already
     // evaluates to a ui::Color (a colour-typed param / color(...) / #hex)
-    if (auto b = sw.binds.find("color"); b != sw.binds.end()) {
+    if (auto b = sw.binds.find(key); b != sw.binds.end()) {
       return b->second;
     }
     float c[4] = {def, def, def, 1};
-    if (const std::string *col = get(sw.attrs, "color")) {
+    if (const std::string *col = get(sw.attrs, key)) {
       if (!parseColor(*col, c)) {
         diags.push_back({m.name, sw.node->line, 0,
                          "unparsable color '" + *col + "'",
@@ -2152,6 +2156,17 @@ struct Emit {
       } kPieces[9] = {{"_c", 1, 1},  {"_bl", 0, 2}, {"_b", 1, 2},
                       {"_br", 2, 2}, {"_l", 0, 1},  {"_r", 2, 1},
                       {"_tl", 0, 0}, {"_t", 1, 0},  {"_tr", 2, 0}};
+      // THE CENTRE AND THE BORDER ARE TWO COLOURS. A frame's `color` paints
+      // its middle piece; `bordercolor` paints the surrounding eight, and
+      // falls back to `color` when it is not given. Painting all nine from
+      // `color` collapses the common "transparent centre, visible ring"
+      // frame (color="1 1 1 0" bordercolor="1 1 1 .3") to nothing at all,
+      // because the per-piece alpha guard then reads the centre's alpha for
+      // the ring. The textureless branch above already knew this.
+      const std::string bcol =
+          get(bag, "bordercolor") != nullptr || sw.binds.count("bordercolor") != 0
+              ? colorLiteral(sw, 1, "bordercolor")
+              : col;
       const std::string fflags = renderFlags(bag, &sw);
       drawLine("{");
       ++drawIndent;
@@ -2159,9 +2174,10 @@ struct Emit {
                ", " + h + ") / 2);");
       drawLine("const float cwm = " + w + " - 2 * bt, chm = " + h +
                " - 2 * bt;");
-      // one colour for all nine pieces, hoisted so a bound colour is read
-      // once and the skip below can test its alpha
+      // hoisted so a bound colour is read once and each piece's skip below
+      // can test the alpha that actually applies to it
       drawLine("const ui::Color fc = " + col + ";");
+      drawLine("const ui::Color fbc = " + bcol + ";");
       for (const auto &p : kPieces) {
         const std::string piece =
             tex->substr(0, dot) + p.suffix + tex->substr(dot);
@@ -2171,11 +2187,14 @@ struct Emit {
             p.gy == 0 ? ay : (p.gy == 1 ? ay + " + bt" : ay + " + bt + chm");
         const std::string pw = p.gx == 1 ? "cwm" : "bt";
         const std::string ph = p.gy == 1 ? "chm" : "bt";
+        // the centre piece wears `color`, the ring wears `bordercolor`
+        const std::string pc =
+            (p.gx == 1 && p.gy == 1) ? std::string("fc") : std::string("fbc");
         // a piece with no area or a fully transparent colour issues no draw
-        drawLine("if (" + pw + " > 0 && " + ph + " > 0 && fc.a > 0) " +
+        drawLine("if (" + pw + " > 0 && " + ph + " > 0 && " + pc + ".a > 0) " +
                  "sink.image({" + x + ", " + y + ", " + pw + ", " + ph +
-                 "}, " + texIdExpr(piece, n.line) + ", {0, 0, 1, 1}, fc, " +
-                 fflags + ", 0, ui::kNoClip);");
+                 "}, " + texIdExpr(piece, n.line) + ", {0, 0, 1, 1}, " + pc +
+                 ", " + fflags + ", 0, ui::kNoClip);");
       }
       --drawIndent;
       drawLine("}");

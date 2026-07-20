@@ -682,6 +682,45 @@ TEST(UicEmit, LabelsDrawRunsAndTheManifestNamesTheirFonts) {
             std::string::npos);
 }
 
+TEST(UicEmit, AFramesRingWearsItsBorderColour) {
+  // a frame is two colours: `color` paints the centre piece, `bordercolor`
+  // the surrounding eight. The "transparent centre, visible ring" frame is a
+  // real and common shape, and painting all nine from `color` erased it —
+  // the per-piece alpha guard read the centre's alpha for the ring.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 20h; height: 20h;\n"
+      "    frame { texture: /art/round.img; borderthickness: 2;\n"
+      "            color: rgba(1, 1, 1, 0); bordercolor: rgba(1, 1, 1, .5); }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("const ui::Color fc = ui::Color{1.0f, 1.0f, 1.0f, 0.0f}"),
+            std::string::npos);
+  EXPECT_NE(h.find("const ui::Color fbc = ui::Color{1.0f, 1.0f, 1.0f, 0.5f}"),
+            std::string::npos);
+  // the centre guards on fc, the ring on fbc — so this frame draws 8 of 9
+  EXPECT_NE(h.find("cwm > 0 && chm > 0 && fc.a > 0"), std::string::npos);
+  EXPECT_NE(h.find("bt > 0 && bt > 0 && fbc.a > 0"), std::string::npos);
+}
+
+TEST(UicEmit, AFrameWithNoBorderColourPaintsAllNineTheSame) {
+  // the fallback: no bordercolor means the ring wears `color`, so a plain
+  // one-colour frame is unchanged
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 20h; height: 20h;\n"
+      "    frame { texture: /art/round.img; borderthickness: 2;\n"
+      "            color: rgba(1, 0, 0, 1); }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("const ui::Color fc = ui::Color{1.0f, 0.0f, 0.0f, 1.0f}"),
+            std::string::npos);
+  EXPECT_NE(h.find("const ui::Color fbc = ui::Color{1.0f, 0.0f, 0.0f, 1.0f}"),
+            std::string::npos);
+}
+
 TEST(UicEmit, AnEmptyRunDrawsNothing) {
   // no glyphs, no commands: the draw pass is guarded on the run, so a label
   // whose bound value is empty emits no text (and no shadow pass) at all.

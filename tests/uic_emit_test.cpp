@@ -853,12 +853,21 @@ TEST(UicEmit, TheProjectionCapturesEveryReadPath) {
   EXPECT_NE(h.find("std::memcmp(&p.unit_hp, &v, sizeof v)"),
             std::string::npos);
   EXPECT_NE(h.find("inline void panel_capture("), std::string::npos);
-  EXPECT_NE(h.find("inline bool panel_memo("), std::string::npos);
-  EXPECT_NE(h.find("if (!panel_dirty(s, screenW, screenH, p)) { return "
-                   "false; }"),
-            std::string::npos);
   EXPECT_NE(h.find("{\"unit.hp\", static_cast<std::size_t>("),
             std::string::npos);
+  // the retained render: the context owns the solved world; the SOLVE is
+  // gated on the layout-only projection (unit.hp gates occupancy here, so
+  // it is layout-class); the draw always runs; the stateless entry is a
+  // scratch context
+  EXPECT_NE(h.find("struct panel_ctx {"), std::string::npos);
+  EXPECT_NE(h.find("void reset_all()"), std::string::npos);
+  EXPECT_NE(h.find("inline bool panel_layout_dirty("), std::string::npos);
+  EXPECT_NE(h.find("if (panel_layout_dirty(s, screenW, screenH, c.proj)) {"),
+            std::string::npos);
+  EXPECT_NE(h.find("c.reset_all();"), std::string::npos);
+  EXPECT_NE(h.find("panel_layout_capture(s, screenW, screenH, c.proj);"),
+            std::string::npos);
+  EXPECT_NE(h.find("  panel_ctx<Snapshot> c;"), std::string::npos);
 }
 
 TEST(UicEmit, FityMemoizesTheLineHeightPerFrame) {

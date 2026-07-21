@@ -1399,6 +1399,178 @@ struct Emit {
     return outText;
   }
 
+  // Declaration lines -> re-initialization statements: "  float a = 0,
+  // b = -1.f;" becomes "a = 0; b = -1.f;", a frame-typed line "  F3_x f3;"
+  // becomes "f3.reset();". Used by the frame/context reset methods so a
+  // reset object equals a freshly constructed one.
+  static std::string declsToResets(const std::string &declLines,
+                                   const std::string &indent) {
+    std::string out;
+    size_t p = 0;
+    while (p < declLines.size()) {
+      size_t e = declLines.find('\n', p);
+      if (e == std::string::npos) {
+        e = declLines.size();
+      }
+      std::string rest = declLines.substr(p, e - p);
+      p = e + 1;
+      // one emitted line can carry several declarations
+      // ("float tx0 = 0, ...; int hasT0 = 0;") — walk them all
+      for (;;) {
+        const size_t b = rest.find_first_not_of(' ');
+        if (b == std::string::npos) {
+          break;
+        }
+        std::string ln = rest.substr(b);
+        if (ln.rfind("float ", 0) == 0) {
+          ln = ln.substr(6);
+        } else if (ln.rfind("int ", 0) == 0) {
+          ln = ln.substr(4);
+        } else if (ln[0] == 'F') {
+          // "F<n>_<name> f<n>;" — a nested frame: reset it
+          const size_t sp = ln.find(' ');
+          const size_t sc = ln.find(';');
+          if (sp != std::string::npos && sc != std::string::npos &&
+              sc > sp) {
+            out += indent + ln.substr(sp + 1, sc - sp - 1) + ".reset();\n";
+          }
+          const size_t nx = ln.find(';');
+          if (nx == std::string::npos) {
+            break;
+          }
+          rest = ln.substr(nx + 1);
+          continue;
+        } else {
+          break;
+        }
+        // scalar declarators: split on top-level commas, one assignment
+        // each, up to the terminating ';'
+        std::string cur;
+        int depth = 0;
+        size_t i = 0;
+        for (; i <= ln.size(); ++i) {
+          const char c = i < ln.size() ? ln[i] : ';';
+          if (c == '(' || c == '{') {
+            ++depth;
+          } else if (c == ')' || c == '}') {
+            --depth;
+          }
+          if ((c == ',' && depth == 0) || c == ';') {
+            while (!cur.empty() && cur.front() == ' ') {
+              cur.erase(cur.begin());
+            }
+            if (!cur.empty()) {
+              out += indent + cur + ";\n";
+            }
+            cur.clear();
+            if (c == ';') {
+              break;
+            }
+          } else {
+            cur += c;
+          }
+        }
+        if (i >= ln.size()) {
+          break;
+        }
+        rest = ln.substr(i + 1);
+      }
+    }
+    return out;
+  }
+
+  // Declaration lines -> reference aliases into a context object: the
+  // render body's text stays verbatim (it names x1, f3, hasT4...) while
+  // the storage lives in `c`.
+  static std::string declsToAliases(const std::string &declLines,
+                                    const std::string &cvar,
+                                    const std::string &indent) {
+    std::string out;
+    size_t p = 0;
+    while (p < declLines.size()) {
+      size_t e = declLines.find('\n', p);
+      if (e == std::string::npos) {
+        e = declLines.size();
+      }
+      std::string rest = declLines.substr(p, e - p);
+      p = e + 1;
+      for (;;) {
+        const size_t b = rest.find_first_not_of(' ');
+        if (b == std::string::npos) {
+          break;
+        }
+        std::string ln = rest.substr(b);
+        std::string type;
+        if (ln.rfind("float ", 0) == 0) {
+          type = "float";
+          ln = ln.substr(6);
+        } else if (ln.rfind("int ", 0) == 0) {
+          type = "int";
+          ln = ln.substr(4);
+        } else if (ln[0] == 'F') {
+          const size_t sp = ln.find(' ');
+          const size_t sc = ln.find(';');
+          if (sp != std::string::npos && sc != std::string::npos &&
+              sc > sp) {
+            const std::string name = ln.substr(sp + 1, sc - sp - 1);
+            out += indent + ln.substr(0, sp) + " &" + name + " = " + cvar +
+                   "." + name + ";\n";
+          }
+          const size_t nx = ln.find(';');
+          if (nx == std::string::npos) {
+            break;
+          }
+          rest = ln.substr(nx + 1);
+          continue;
+        } else {
+          break;
+        }
+        // declarator names: the identifier before each '=' / ',' / ';'
+        std::string cur;
+        int depth = 0;
+        bool inInit = false;
+        size_t i = 0;
+        for (; i <= ln.size(); ++i) {
+          const char c = i < ln.size() ? ln[i] : ';';
+          if (c == '(' || c == '{') {
+            ++depth;
+          } else if (c == ')' || c == '}') {
+            --depth;
+          }
+          if (c == '=' && depth == 0) {
+            inInit = true;
+          }
+          if ((c == ',' && depth == 0) || c == ';') {
+            while (!cur.empty() && cur.front() == ' ') {
+              cur.erase(cur.begin());
+            }
+            while (!cur.empty() && cur.back() == ' ') {
+              cur.pop_back();
+            }
+            if (!cur.empty()) {
+              out += indent + type + " &" + cur + " = " + cvar + "." + cur +
+                     ";\n";
+            }
+            cur.clear();
+            inInit = false;
+            if (c == ';') {
+              break;
+            }
+          } else if (!inInit && c != '=' &&
+                     ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                      (c >= '0' && c <= '9') || c == '_')) {
+            cur += c;
+          }
+        }
+        if (i >= ln.size()) {
+          break;
+        }
+        rest = ln.substr(i + 1);
+      }
+    }
+    return out;
+  }
+
   // Identifiers a fragment DECLARES itself (loop counters, epilogue
   // locals, draw locals): `for (int pass9`, `const float nx13 = `,
   // `const auto src40 = `.
@@ -1589,7 +1761,14 @@ struct Emit {
       frameDefs << "  " << (isIntFamily(outers[k]) ? "int" : "float")
                 << " li" << k << " = 0;\n";
     }
-    frameDefs << "};\n\n";
+    // reset(): re-establish every member's initializer and recurse into
+    // nested frames — a reset frame is indistinguishable from a freshly
+    // constructed one. A retained context calls this whenever its layout
+    // projection dirties, so a solve-dirty frame re-converges from scratch
+    // exactly like the stateless path; a solve-clean frame touches none
+    // of it.
+    frameDefs << "  void reset() {\n    ran = 0;\n"
+              << declsToResets(memberLines, "    ") << "  }\n};\n\n";
 
     frameDefs << "template <class Snapshot, class Sink>\n"
               << "UIC_GEN_NOINLINE void " << info.fnName
@@ -3399,6 +3578,38 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
     }
     os << "  p.w_ = screenW;\n  p.h_ = screenH;\n  p.primed_ = 1;\n}\n\n";
 
+    // the layout-only pair: the retained render gates its SOLVE on these
+    // fields alone — draw-only fields never dirty geometry
+    os << "// layout-affecting fields only: the retained render's solve "
+          "gate\n"
+       << "template <class Snapshot>\n"
+       << "inline bool " << fn
+       << "_layout_dirty(const Snapshot &s, float screenW, float screenH, "
+          "const "
+       << fn << "_proj<Snapshot> &p) {\n"
+       << "  if (p.primed_ == 0) { return true; }\n"
+       << "  if (!gen_detail::feq(p.w_, screenW) || !gen_detail::feq(p.h_, "
+          "screenH)) { return true; }\n";
+    for (const auto &mp : allPaths) {
+      if (layoutMembers.count(mp.first) == 0) {
+        continue;
+      }
+      os << "  { const auto v = s." << mp.second << "; if (std::memcmp(&p."
+         << mp.first << ", &v, sizeof v) != 0) { return true; } }\n";
+    }
+    os << "  return false;\n}\n\n"
+       << "template <class Snapshot>\n"
+       << "inline void " << fn
+       << "_layout_capture(const Snapshot &s, float screenW, float screenH, "
+       << fn << "_proj<Snapshot> &p) {\n";
+    for (const auto &mp : allPaths) {
+      if (layoutMembers.count(mp.first) == 0) {
+        continue;
+      }
+      os << "  p." << mp.first << " = s." << mp.second << ";\n";
+    }
+    os << "  p.w_ = screenW;\n  p.h_ = screenH;\n  p.primed_ = 1;\n}\n\n";
+
     os << "// (path, offset, size) per projected field — the mutation\n"
        << "// harness's handle on the probe. Offsets come from pointer\n"
        << "// arithmetic over a real object (offsetof cannot reach through\n"
@@ -3470,25 +3681,50 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
       << nsClose;
     *hierOut = h.str();
   }
-  std::ostringstream memoFn;
-  memoFn << "// The memo entry: render only when the projection (or the\n"
-         << "// screen size) changed since the last capture. Returns false\n"
-         << "// WITHOUT a single sink call when clean — the caller reuses\n"
-         << "// whatever it retained from the last true return.\n"
-         << "template <class Snapshot, class Sink>\n"
-         << "inline bool " << fn
-         << "_memo(const Snapshot &s, float screenW, float screenH, Sink "
-            "&sink, "
-         << fn << "_proj<Snapshot> &p) {\n"
-         << "  if (!" << fn << "_dirty(s, screenW, screenH, p)) { return "
-            "false; }\n"
-         << "  " << fn << "_capture(s, screenW, screenH, p);\n"
-         << "  " << fn << "(s, screenW, screenH, sink);\n"
-         << "  return true;\n}\n\n";
-  return prefix + e.frameDefs.str() + e.drawFnDefs.str() +
-         emitFn(fn, e.draw.str(),
-                "  // ---- draw (render order, absolute) ----\n") +
-         memoFn.str() + nsClose;
+  // The retained render: the context owns every solved value (and the
+  // layout projection). The sink receives the FULL frame every call —
+  // the panel composites into a shared target, so skipping emission is
+  // never an option; what the context saves is the SOLVE, gated on the
+  // layout projection. Capture happens after the solve completes, so a
+  // mid-solve throw leaves the projection stale-dirty and the next frame
+  // re-converges from scratch — torn frames self-heal.
+  std::ostringstream ctxOut;
+  const std::string declText = e.decl.str();
+  ctxOut << "template <class Snapshot> struct " << fn << "_ctx {\n"
+         << "  " << fn << "_proj<Snapshot> proj;\n"
+         << declText << "  void reset_all() {\n"
+         << Emit::declsToResets(declText, "    ") << "    proj.primed_ = 0;\n"
+         << "  }\n};\n\n";
+  ctxOut << "template <class Snapshot, class Sink>\n"
+         << "void " << fn
+         << "(const Snapshot &s, float screenW, float screenH, Sink &sink, "
+         << fn << "_ctx<Snapshot> &c) {\n"
+         << "  using gen_detail::R;\n"
+         << "  (void)s;\n"
+         << "  const float W = screenW, H = screenH;\n"
+         << "  (void)W;\n"
+         << "  // ---- storage aliases (the context owns the solved world) "
+            "----\n"
+         << Emit::declsToAliases(declText, "c", "  ")
+         << "  if (" << fn
+         << "_layout_dirty(s, screenW, screenH, c.proj)) {\n"
+         << "    c.reset_all();\n"
+         << "    // ---- solve (the schedule) ----\n"
+         << e.solve.str() << "    " << fn
+         << "_layout_capture(s, screenW, screenH, c.proj);\n"
+         << "  }\n"
+         << "  // ---- draw (render order, absolute) ----\n"
+         << e.draw.str() << "}\n\n";
+  // the stateless entry: one body, two drivers — a scratch context on the
+  // stack renders exactly like a first retained frame
+  ctxOut << "template <class Snapshot, class Sink>\n"
+         << "void " << fn
+         << "(const Snapshot &s, float screenW, float screenH, Sink &sink) "
+            "{\n"
+         << "  " << fn << "_ctx<Snapshot> c;\n"
+         << "  " << fn << "(s, screenW, screenH, sink, c);\n}\n\n";
+  return prefix + e.frameDefs.str() + e.drawFnDefs.str() + ctxOut.str() +
+         nsClose;
 }
 
 } // namespace uic

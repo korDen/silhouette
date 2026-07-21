@@ -1397,6 +1397,25 @@ TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
       << viaLiteral;
 }
 
+TEST(UicEmit, AModelPanelTakesItsPlaceWithoutDrawing) {
+  // A 3D viewport yields nothing static, but it is still a widget: skipping it
+  // as an unsupported tag dropped it out of the LAYOUT too, which moves every
+  // sibling that chains or unions against it.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { grow: 1; float: left; width: 20h; height: 8h;\n"
+      "    modelpanel { width: 5h; height: 5h; }\n"
+      "    image { texture: /a.tga; width: 2h; height: 2h; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  EXPECT_EQ(h.find("SKIP"), std::string::npos) << h; // laid out, not skipped
+  // it occupies a rect, so the image after it chains from ITS far edge
+  EXPECT_NE(h.find("w1 = R(0.0500000007f * H)"), std::string::npos) << h;
+  // ...and issues no draw of its own
+  EXPECT_EQ(h.find("sink.image({ax1"), std::string::npos) << h;
+  EXPECT_EQ(h.find("sink.quad({ax1"), std::string::npos) << h;
+}
+
 TEST(UicEmit, AnEmptyColourLeavesTheWidgetDefaultStanding) {
   // A colour-typed param no call site supplies folds to EMPTY, which does not
   // parse — and an unparsable colour must leave the widget's own default, not

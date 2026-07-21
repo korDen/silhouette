@@ -1254,7 +1254,7 @@ struct Emit {
     if (!isState &&
         n.tag != "panel" && n.tag != "image" && n.tag != "frame" &&
         n.tag != "button" && n.tag != "label" && n.tag != "animatedimage" &&
-        n.tag != "piegraph") {
+        n.tag != "piegraph" && n.tag != "modelpanel") {
       auto tpl = templates.find(n.tag);
       if (tpl == templates.end()) {
         skip(n.line, "widget '" + n.tag + "'");
@@ -2233,6 +2233,14 @@ struct Emit {
         "{" + ax + ", " + ay + ", " + w + ", " + h + "}";
     if (n.tag == "label") {
       emitLabel(sw, ax, ay, w, h);
+      return;
+    }
+    if (n.tag == "modelpanel") {
+      // A 3D viewport. Nothing STATIC comes out of it, so it draws nothing —
+      // but it is still a widget: it takes its place, occupies its rect, and
+      // feeds the unions and chains around it. Skipping it outright (as an
+      // unsupported tag) removed it from the LAYOUT as well, which moves its
+      // siblings.
       return;
     }
     if (n.tag == "piegraph") {

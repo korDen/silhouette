@@ -1253,7 +1253,8 @@ struct Emit {
     }
     if (!isState &&
         n.tag != "panel" && n.tag != "image" && n.tag != "frame" &&
-        n.tag != "button" && n.tag != "label" && n.tag != "animatedimage") {
+        n.tag != "button" && n.tag != "label" && n.tag != "animatedimage" &&
+        n.tag != "piegraph") {
       auto tpl = templates.find(n.tag);
       if (tpl == templates.end()) {
         skip(n.line, "widget '" + n.tag + "'");
@@ -2219,6 +2220,33 @@ struct Emit {
         "{" + ax + ", " + ay + ", " + w + ", " + h + "}";
     if (n.tag == "label") {
       emitLabel(sw, ax, ay, w, h);
+      return;
+    }
+    if (n.tag == "piegraph") {
+      // A centre fan: the wedge sweeping from `start` toward `end` and
+      // covering `value` (0..1) of that arc — a radial progress dial. The
+      // authoring angles are measured from +x with y running DOWN; the sink's
+      // are measured from straight up, clockwise. Same handedness, a quarter
+      // turn apart, so both ends shift by +90.
+      const std::string *v = get(bag, "value");
+      const auto num = [](const std::string *s, float def) {
+        return s != nullptr ? std::strtof(s->c_str(), nullptr) : def;
+      };
+      // clamped, because an out-of-range fraction is a wedge that wraps
+      const auto vb = sw.binds.find("value");
+      const std::string val =
+          vb != sw.binds.end()
+              ? "std::min(1.0f, std::max(0.0f, (float)(" + vb->second + ")))"
+              : ftos(std::min(1.0f, std::max(0.0f, num(v, 1.0f))));
+      const std::string col = colorLiteral(sw, 1);
+      const auto angle = [&](const char *key, float def) {
+        return ftos(num(get(bag, key), def) + 90.0f);
+      };
+      // an empty wedge or a transparent one issues no draw
+      drawLine("if (" + val + " > 0 && (" + col + ").a > 0) sink.sweep(" +
+               dst + ", " + col + ", " + angle("start", 270.0f) + ", " +
+               angle("end", -90.0f) + ", " + val + ", " +
+               maskOf(bag, n.line) + ", ui::kNoClip);");
       return;
     }
     if (n.tag == "frame") {

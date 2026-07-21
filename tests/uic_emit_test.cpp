@@ -1397,6 +1397,40 @@ TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
       << viaLiteral;
 }
 
+TEST(UicEmit, APieGraphSweepsItsArc) {
+  // A centre fan: the wedge from `start` toward `end` covering `value` of the
+  // arc — a radial dial. Authoring angles run from +x with y DOWN; the sink's
+  // run from straight up, clockwise. Same handedness, a quarter turn apart,
+  // so both ends shift by +90.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 20h; height: 20h;\n"
+      "    piegraph { start: 270; end: -90; value: 0.25;\n"
+      "               color: rgba(0, 0, 0, .8); width: 4h; height: 4h; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  EXPECT_EQ(h.find("SKIP"), std::string::npos) << h; // laid out, not skipped
+  EXPECT_NE(h.find("sink.sweep("), std::string::npos) << h;
+  EXPECT_NE(h.find("360"), std::string::npos) << h; // start 270 + 90
+  EXPECT_NE(h.find("0.25f"), std::string::npos) << h;
+}
+
+TEST(UicEmit, APieGraphsValueIsBindableAndClamped) {
+  // the dial's fill is the whole point of it, so it binds; and an out-of-range
+  // fraction is a wedge that wraps, so it clamps
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 20h; height: 20h;\n"
+      "    piegraph { start: 270; end: -90; color: #000000;\n"
+      "               width: 4h; height: 4h;\n"
+      "               bind value: snapshot.unit.hp; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  EXPECT_NE(h.find("std::min(1.0f, std::max(0.0f, (float)(s.unit.hp)))"),
+            std::string::npos)
+      << h;
+}
+
 TEST(UicEmit, AnOrFallbackPicksPerUseWhenTheCallerSaysNothing) {
   // `a ?? b` — a param carries ONE declared default, but a template may want a
   // DIFFERENT fallback at each USE of that param. Two labels share `face`;

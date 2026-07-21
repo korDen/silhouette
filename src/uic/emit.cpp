@@ -1802,8 +1802,19 @@ struct Emit {
       }
       return "R(" + dimExpr(parseDim(*v), horizontal, pw, ph, false) + ")";
     };
+    // The measure/line_height results cannot change within a frame (the
+    // font id and the text source are fixed for the whole call), but the
+    // solve re-runs these lines on every enclosing grow pass. Memoize per
+    // site: one -1-sentinel local per fit dimension, filled on first
+    // execution, reused by every re-run. Byte-identical results — the
+    // memoized value IS the recomputed value.
+    const std::string sfx = std::to_string(sw.idx);
     if (fitX) {
-      solveLine(vw + " = sink.measure(" + font + ", " + textExpr(sw) + ");");
+      const std::string mm = "mw" + sfx;
+      decl << "  float " << mm << " = -1.f;\n";
+      solveLine("if (" + mm + " < 0.0f) { " + mm + " = sink.measure(" + font +
+                ", " + textExpr(sw) + "); }");
+      solveLine(vw + " = " + mm + ";");
       const std::string mn = sizeAttr("fitxmin", true);
       const std::string mx = sizeAttr("fitxmax", true);
       if (!mn.empty()) {
@@ -1818,7 +1829,11 @@ struct Emit {
       }
     }
     if (fitY) {
-      solveLine(vh + " = sink.line_height(" + font + ");");
+      const std::string mm = "mlh" + sfx;
+      decl << "  float " << mm << " = -1.f;\n";
+      solveLine("if (" + mm + " < 0.0f) { " + mm + " = sink.line_height(" +
+                font + "); }");
+      solveLine(vh + " = " + mm + ";");
       const std::string mn = sizeAttr("fitymin", false);
       const std::string mx = sizeAttr("fitymax", false);
       if (!mn.empty()) {

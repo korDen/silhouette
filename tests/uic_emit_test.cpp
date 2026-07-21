@@ -785,7 +785,12 @@ TEST(UicEmit, FitxLabelsMeasureInTheSolve) {
       "}\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  EXPECT_NE(h.find("w1 = sink.measure("), std::string::npos);
+  // the measure is memoized per site: the sentinel guard fills mw1 on the
+  // first execution and every grow-pass re-run reuses it — same value,
+  // measured once per frame
+  EXPECT_NE(h.find("if (mw1 < 0.0f) { mw1 = sink.measure("),
+            std::string::npos);
+  EXPECT_NE(h.find("w1 = mw1;"), std::string::npos);
   // the fitxpadding is ROUNDED by the per-widget round (floor(f+0.5)).
   // Without R() a "0.1h" padding (1.08px) fit a 6px glyph to 7.08 instead
   // of 7 — and the 0.08 rode the grow chain into 1px offsets downstream.
@@ -794,6 +799,24 @@ TEST(UicEmit, FitxLabelsMeasureInTheSolve) {
   EXPECT_NE(h.find("w1 += R("), std::string::npos); // rounded fitxpadding
   // and the measured width feeds the chain: the icon follows the text
   EXPECT_NE(h.find("tx0 = x1; ty0 = y1; tw0 = w1;"), std::string::npos);
+}
+
+TEST(UicEmit, FityMemoizesTheLineHeightPerFrame) {
+  // fity sizes to the font cell; the line_height result cannot change
+  // within a frame, so it is memoized per site exactly like the fitx
+  // measure — filled once, reused by every grow-pass re-run
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h; grow: 1;\n"
+      "    label { content: \"x\"; font: dyn_9; fity: 1;\n"
+      "            fitypadding: 0.5h; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("if (mlh1 < 0.0f) { mlh1 = sink.line_height("),
+            std::string::npos);
+  EXPECT_NE(h.find("h1 = mlh1;"), std::string::npos);
+  EXPECT_NE(h.find("h1 += R("), std::string::npos); // rounded fitypadding
 }
 
 TEST(UicEmit, NumbersRenderIntoRunsWithoutInterpolation) {

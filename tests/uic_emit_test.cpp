@@ -931,9 +931,14 @@ TEST(UicEmit, AMatchInABindLowersToAConvertedTernary) {
 }
 
 TEST(UicEmit, AMatchOverANumberNeedsNoConversion) {
-  // match works over a plain (non-enum) scrutinee: its values are literals
-  // compared as written, and with no conversion the arms ARE the result (a
-  // texture id here) — the else-chain a multi-branch bind would otherwise be.
+  // match works over a plain (non-enum) scrutinee, and with no conversion the
+  // arms ARE the result (a texture id here).
+  //
+  // A numeric scrutinee is always a PARAM — the grammar takes an identifier,
+  // not an expression — so the instantiation always settles it and the arm is
+  // picked here rather than at runtime. There is no reachable case where the
+  // comparison chain survives, which is why this asserts the picked arm and
+  // not a chain.
   std::vector<uic::Diag> diags;
   const std::string h = emit(
       "template slot { in kind: num;\n"
@@ -942,8 +947,9 @@ TEST(UicEmit, AMatchOverANumberNeedsNoConversion) {
       "panel { slot { kind: 1; } }\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  EXPECT_NE(h.find("(1) == 0"), std::string::npos);       // kind folds to 1
-  EXPECT_NE(h.find("(1) == 1"), std::string::npos);       // compared as written
+  EXPECT_NE(h.find("/art/b.img"), std::string::npos) << h;  // kind 1's arm
+  EXPECT_EQ(h.find("/art/a.img"), std::string::npos) << h;  // ...and only it
+  EXPECT_EQ(h.find("/art/c.img"), std::string::npos) << h;
   EXPECT_EQ(h.find("gen_detail::num"), std::string::npos); // no conversion
 }
 
@@ -1000,12 +1006,16 @@ TEST(UicEmit, AMisspelledEnumValueIsLoud) {
       << diags[0].msg;
 }
 
-TEST(UicEmit, ATextTernaryCoercesEachBranchToAView) {
+TEST(UicEmit, ATextTernaryCoercesEachBranchToAnOwningRun) {
   // a `content` value that is a ternary can mix text types with no common
-  // C++ type — a fixed char[N] field and a str param, say — so each RESULT
-  // is coerced to a string_view and the branches then unify. sv() is
-  // idempotent, so textExpr's own outer sv() over the whole run still holds;
-  // a non-ternary content is left for that outer sv() alone.
+  // C++ type — a fixed char[N] field and a str param, say — so each RESULT is
+  // coerced and the branches then unify. It coerces to an OWNING run, not a
+  // view: an arm whose text is built on the spot (fmt/num/fixed) hands back a
+  // buffer that dies with the initialising expression, and a view of it is
+  // read long after. sv() over the stored run still holds at the use site.
+  //
+  // The enum scrutinee here is deliberately NOT folded (only numeric ones
+  // are), so both arms survive and the coercion is visible.
   std::vector<uic::Diag> diags;
   const std::string h =
       emit("template plate { in gate: on | off; in text: str;\n"
@@ -1015,8 +1025,9 @@ TEST(UicEmit, ATextTernaryCoercesEachBranchToAView) {
            &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   // each result is wrapped, not the ternary as a whole
-  EXPECT_NE(h.find("? gen_detail::sv(s.unit.name) : gen_detail::sv("),
-            std::string::npos);
+  EXPECT_NE(h.find("? gen_detail::own(s.unit.name) : gen_detail::own("),
+            std::string::npos)
+      << h;
 }
 
 TEST(UicEmit, AnEmptyOffsetStaysInTheFloatChain) {
@@ -1395,6 +1406,88 @@ TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
       << viaLiteral;
   EXPECT_NE(viaLiteral.find("h1 = R(0.949999988f * w0);"), std::string::npos)
       << viaLiteral;
+}
+
+TEST(UicEmit, AMultiArmTextRunOwnsItsBytes) {
+  // A ternary yields ONE value, so its arms must agree on a type. Viewing
+  // each arm made them agree — and made the stored run a view of a buffer
+  // that died with the expression that built it, so the text was measured and
+  // drawn from freed stack. The arms own their bytes instead.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 20h; height: 4h;\n"
+      "    label { width: 5h; height: 2h;\n"
+      "        bind content: snapshot.unit.dead ? fmt(\"dead\")\n"
+      "                                         : fmt(\"{}\", snapshot.unit.hp); } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  EXPECT_NE(h.find("gen_detail::own("), std::string::npos) << h;
+  // the run is stored, so nothing may hold a view of an arm's temporary
+  EXPECT_EQ(h.find("gen_detail::sv(gen_detail::fmt("), std::string::npos) << h;
+}
+
+TEST(UicEmit, ASettledConditionPicksItsArmAndTheOtherNeverExists) {
+  // Template params fold to literals, so a condition over one is decided at
+  // expansion. Emitting the losing arm anyway is not merely wasteful: the
+  // arms may disagree about WHICH array they index, and then the winner's
+  // index is written against the loser's bounds too — an expression that
+  // must never be evaluated. Folding means it never exists.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template t {\n"
+      "    in kind: num;\n"
+      "    in slot: num;\n"
+      "    panel { width: 20h; height: 4h;\n"
+      "        image { texture: /a.tga; width: 2h; height: 2h;\n"
+      "            bind visible: kind == 0 ? snapshot.unit.abilities[slot].boosted\n"
+      "                                    : snapshot.player.stash[slot].exists; } } }\n"
+      "t { kind: 0; slot: 5; }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  EXPECT_NE(h.find("s.unit.abilities[(5)].boosted"), std::string::npos) << h;
+  // the losing arm is GONE — not merely unreachable. `stash` has no other
+  // reason to appear, so its absence IS the fold. (A blanket search for "?"
+  // would catch the runtime helpers in the preamble, which are not this.)
+  EXPECT_EQ(h.find("stash"), std::string::npos) << h;
+  EXPECT_EQ(h.find("(0) == 0"), std::string::npos) << h;
+}
+
+TEST(UicEmit, ASettledMatchScrutineePicksItsArmToo) {
+  // a match lowers to the same ternary chain, so it needs the fold in its own
+  // right — the losing arms address a different array than the winner
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template t {\n"
+      "    in kind: num;\n"
+      "    in slot: num;\n"
+      "    panel { width: 20h; height: 4h;\n"
+      "        image { width: 2h; height: 2h;\n"
+      "            bind texture: match kind {\n"
+      "                0: snapshot.unit.backpack[slot].icon,\n"
+      "                1: snapshot.unit.consumables[slot].icon,\n"
+      "                2: snapshot.player.stash[slot].icon }; } } }\n"
+      "t { kind: 0; slot: 5; }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  EXPECT_NE(h.find("s.unit.backpack[(5)].icon"), std::string::npos) << h;
+  EXPECT_EQ(h.find("consumables"), std::string::npos) << h;
+  EXPECT_EQ(h.find("stash"), std::string::npos) << h;
+}
+
+TEST(UicEmit, AConditionTheInstantiationCannotSettleKeepsBothArms) {
+  // the fold is narrow on purpose: a snapshot field is not knowable at
+  // expansion, so nothing about that ternary changes
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 20h; height: 4h;\n"
+      "    image { texture: /a.tga; width: 2h; height: 2h;\n"
+      "        bind visible: snapshot.unit.hp == 0 ? snapshot.unit.dead\n"
+      "                                            : snapshot.unit.boosted; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  EXPECT_NE(h.find(" ? "), std::string::npos) << h;
+  EXPECT_NE(h.find("s.unit.dead"), std::string::npos) << h;
+  EXPECT_NE(h.find("s.unit.boosted"), std::string::npos) << h;
 }
 
 TEST(UicEmit, ABlendedSolidFillDrawsThroughTheWhiteTexel) {

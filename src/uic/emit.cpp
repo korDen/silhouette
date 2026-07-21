@@ -724,9 +724,22 @@ struct Emit {
       }
       return "(" + expr(*e.args[0]) + " " + e.text + " " +
              expr(*e.args[1]) + ")";
-    case Expr::kTernary:
+    case Expr::kTernary: {
+      // A CONDITION THE INSTANTIATION ALREADY DECIDED PICKS ITS ARM HERE.
+      // Template params fold to literals, so `slot_kind == 1 ? a : b` is
+      // settled at expansion — and emitting the losing arm anyway is not
+      // merely wasteful, it is emitting an expression that must never be
+      // evaluated. An arm indexing a per-kind array is the sharp case: the
+      // arms disagree about which array, so the winning arm's index is
+      // written against the losing arm's bounds too, and only the dead branch
+      // keeps it from being read. Fold, and the impossible arm never exists.
+      bool cond = false;
+      if (constCond(*e.args[0], cond)) {
+        return expr(*e.args[cond ? 1 : 2]);
+      }
       return "(" + expr(*e.args[0]) + " ? " + expr(*e.args[1]) + " : " +
              expr(*e.args[2]) + ")";
+    }
     case Expr::kMatch: {
       // [conv](scrutinee == V0 ? r0 : ... : rLast) — last arm is the else.
       // An inline-enum scrutinee folds to its named id and its values are
@@ -736,6 +749,37 @@ struct Emit {
       const size_t n = e.cases.size(); // arms; args = 1 (scrutinee) + n
       if (n < 2 || e.args.size() != n + 1) {
         err(e.line, "match needs at least two arms");
+        return "0";
+      }
+      // A SCRUTINEE THE INSTANTIATION ALREADY DECIDED PICKS ITS ARM. Same
+      // reason as the ternary (see kTernary): the losing arms may address a
+      // different array than the winner, so leaving them in writes the
+      // winner's index against their bounds. A match lowers to a ternary
+      // chain, so it needs the fold in its own right.
+      long long scv = 0;
+      if (set == nullptr && constInt(*e.args[0], scv)) {
+        size_t arm = n - 1; // the else
+        for (size_t i = 0; i + 1 < n; ++i) {
+          long long cv = 0;
+          Expr lit;
+          lit.kind = Expr::kNumber;
+          lit.text = e.cases[i];
+          if (constInt(lit, cv) && cv == scv) {
+            arm = i;
+            break;
+          }
+        }
+        const std::string picked = expr(*e.args[arm + 1]);
+        if (e.text.empty()) {
+          return picked;
+        }
+        if (e.text == "num") {
+          return "gen_detail::num((long long)(" + picked + "))";
+        }
+        if (e.text == "ord") {
+          return "(long long)(" + picked + ")";
+        }
+        err(e.line, "match conversion '" + e.text + "' (only num/ord)");
         return "0";
       }
       const std::string sc =
@@ -921,6 +965,52 @@ struct Emit {
 
   // a value that exactly names a template parameter substitutes to the
   // instantiation's argument (typed params fold — no splicing)
+  // An expression the instantiation has already settled: a number, or a param
+  // that substituted to one. Deliberately NARROW — it exists to recognise the
+  // discriminator a call site passed, not to constant-fold arithmetic — so a
+  // snapshot field, an enum member or anything computed is simply "not
+  // constant" and nothing changes for it.
+  bool constInt(const Expr &e, long long &out) const {
+    std::string text;
+    if (e.kind == Expr::kNumber) {
+      text = e.text;
+    } else if (e.kind == Expr::kIdent) {
+      text = substitute(e.text);
+      if (text == e.text) {
+        return false; // not a param — a field, an enum member, a global
+      }
+    } else {
+      return false;
+    }
+    if (text.empty()) {
+      return false;
+    }
+    const char *p = text.c_str();
+    char *end = nullptr;
+    const long long v = std::strtoll(p, &end, 10);
+    if (end == p || *end != '\0') {
+      return false; // not a whole number (a dim, a path, a word)
+    }
+    out = v;
+    return true;
+  }
+
+  // ...and the equality test over two of those, which is the shape a folded
+  // discriminator takes (`kind == 2`). Ordering comparisons are deliberately
+  // absent: nothing needs them yet, and a rule nobody exercises is a rule
+  // nobody checks.
+  bool constCond(const Expr &e, bool &out) const {
+    if (e.kind != Expr::kBinary || (e.text != "==" && e.text != "!=")) {
+      return false;
+    }
+    long long a = 0, b = 0;
+    if (!constInt(*e.args[0], a) || !constInt(*e.args[1], b)) {
+      return false;
+    }
+    out = e.text == "==" ? a == b : a != b;
+    return true;
+  }
+
   std::string substitute(const std::string &v) const {
     for (auto it = envStack.rbegin(); it != envStack.rend(); ++it) {
       auto hit = it->find(v);
@@ -1635,10 +1725,20 @@ struct Emit {
     if (e.kind != Expr::kTernary) {
       return expr(e);
     }
+    // Each arm must OWN its bytes, not view them. The arms have to agree on a
+    // type for the ternary to have one, and viewing was how they agreed — but
+    // an arm's buffer is a temporary of the initialising expression, so the
+    // stored view outlived it and the run was read after the bytes were gone.
     auto result = [&](const Expr &r) {
       return r.kind == Expr::kTernary ? textBind(r)
-                                      : "gen_detail::sv(" + expr(r) + ")";
+                                      : "gen_detail::own(" + expr(r) + ")";
     };
+    // a condition the instantiation already decided picks its arm (see the
+    // kTernary case in expr) — a text run is no different
+    bool cond = false;
+    if (constCond(*e.args[0], cond)) {
+      return result(*e.args[cond ? 1 : 2]);
+    }
     return "(" + expr(*e.args[0]) + " ? " + result(*e.args[1]) + " : " +
            result(*e.args[2]) + ")";
   }
@@ -2621,6 +2721,19 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "}\n"
      << "inline std::string_view sv(const ::fmt::memory_buffer &b) {\n"
      << "  return std::string_view(b.data(), b.size());\n"
+     << "}\n"
+     << "// A run that OWNS its bytes. A multi-arm text bind is a ternary, and\n"
+     << "// a ternary yields one value -- so the arms have to agree on a type.\n"
+     << "// Viewing them (sv per arm) makes them agree, but a view of an arm's\n"
+     << "// temporary buffer outlives that buffer: the run is read after the\n"
+     << "// full-expression that built it has ended. Copying into a buffer of\n"
+     << "// our own is what makes the arms agree AND keeps the bytes, at the\n"
+     << "// cost of one copy on a branch that had to materialise anyway.\n"
+     << "template <class T> inline ::fmt::memory_buffer own(T &&v) {\n"
+     << "  const std::string_view s = sv(v);\n"
+     << "  ::fmt::memory_buffer b;\n"
+     << "  b.append(s.data(), s.data() + s.size());\n"
+     << "  return b;\n"
      << "}\n"
      << "} // namespace gen_detail\n\n";
   // inline-enum id constants THIS file uses, folded to their sid at emit

@@ -13,7 +13,6 @@
 
 int main(int argc, char **argv) {
   bool dump = false;
-  bool rectLog = false;
   std::string schemaOut;
   std::string emitOut;
   std::string hierOut;
@@ -51,8 +50,6 @@ int main(int argc, char **argv) {
       styleFiles.emplace_back(next());
     } else if (std::strcmp(argv[i], "--with") == 0) {
       withFiles.emplace_back(next());
-    } else if (std::strcmp(argv[i], "--rect-log") == 0) {
-      rectLog = true;
     } else if (std::strcmp(argv[i], "--schema-include") == 0) {
       schemaInclude = next();
     } else if (std::strcmp(argv[i], "--namespace") == 0) {
@@ -147,7 +144,6 @@ int main(int argc, char **argv) {
           opt.allowedMissingAssets.insert(line.substr(b, e - b + 1));
         }
       }
-      opt.rectLog = rectLog;
       // side modules (--styles/--with): parsed once, owned here for
       // the emit's duration
       std::vector<uic::Module> sideModules;

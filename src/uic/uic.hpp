@@ -70,7 +70,6 @@ struct EmitOptions {
   // an error, and a listed asset that DOES exist is also an error, so an
   // exception cannot outlive the gap it was written for.
   std::set<std::string> allowedMissingAssets;
-  bool rectLog = false;  // emit the rect-gate hook (RectLog parameter)
   // styles, templates, and asset consts resolve from the module itself
   // plus these (parsed modules, caller-owned): --styles/--with
   std::vector<const Module *> styleModules;
@@ -79,7 +78,8 @@ struct EmitOptions {
 // Returns the panel header (the <module> render function). When `hierOut` is
 // non-null it also receives a companion header defining a `<panel>_hier`
 // function: the same geometry, but each node opens a src_path:src_line marker
-// before its draws, for the structural parity diff (no rect-log parameter).
+// (with the node's absolute rect) before its draws, for the structural
+// parity diff.
 std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
                             std::vector<Diag> &diags,
                             std::string *hierOut = nullptr);

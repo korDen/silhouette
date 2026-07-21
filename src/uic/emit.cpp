@@ -4,8 +4,7 @@
 // to a self-contained header:
 //
 //   template <class Snapshot, class Sink>
-//   void <module>(const Snapshot&, float screenW, float screenH,
-//                 Sink&, RectLog* = nullptr);
+//   void <module>(const Snapshot&, float screenW, float screenH, Sink&);
 //
 // Generated shape: one flat set of rect variables, a SOLVE block that
 // replays the schedule (document order; float-chain cursors; grow
@@ -16,9 +15,9 @@
 //
 // Degradation is loud, never fatal: unsupported constructs warn and
 // leave SKIP comments; the module still renders (the functional bar).
-// RectLog is the rect gate's hook: when non-null the solve block
-// reports every widget's absolute rect with tag/name for diffing
-// against a reference solver's dump.
+// Geometry inspection is the hier walk's job (--emit-hier): it opens a
+// provenance marker with the node's absolute rect before each node's
+// draws, which strictly supersedes a per-widget rect log.
 #include "uic/uic.hpp"
 
 #include <cctype>
@@ -2104,13 +2103,6 @@ struct Emit {
     const std::string ax = "ax" + sfx, ay = "ay" + sfx;
     drawLine("const float " + ax + " = " + pax + " + x" + sfx + ";");
     drawLine("const float " + ay + " = " + pay + " + y" + sfx + ";");
-    if (opt.rectLog) {
-      const std::string *nm = get(sw.attrs, "name");
-      drawLine("if (log) log->add(\"" + n.tag + "\", \"" +
-               (nm != nullptr ? *nm : std::string()) + "\", " + ax + ", " +
-               ay + ", w" + sfx + ", h" + sfx + ");");
-    }
-
     const std::string *vis = get(sw.attrs, "visible");
     const bool hidden =
         vis != nullptr && (*vis == "0" || *vis == "false");
@@ -2153,7 +2145,7 @@ struct Emit {
 
   // The parity walk's twin of drawNode: identical ax/ay, gate, emitDraw, and
   // recursion (so the draws are byte-for-byte the render's), but it opens a
-  // node marker carrying provenance instead of the rect-log. Hidden subtrees
+  // node marker carrying provenance and the rect. Hidden subtrees
   // drop exactly as the render drops them (we compare the visible tree). The
   // marker sits INSIDE the gate, so only a node the render actually draws opens
   // one. `srcPath` inherits from the nearest template root; a node with its own
@@ -2750,16 +2742,6 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
     }
     os << "} // namespace ident\n\n";
   }
-  if (opt.rectLog) {
-    os << "// the rect gate's hook: absolute rect per widget, document "
-          "order\n"
-       << "struct RectLog {\n"
-       << "  virtual ~RectLog() = default;\n"
-       << "  virtual void add(std::string_view tag, std::string_view "
-          "name,\n"
-       << "                   float x, float y, float w, float h) = 0;\n"
-       << "};\n\n";
-  }
   os << "// host registration manifest: load each path, register under "
         "its id\n"
      << "struct TexRef { ui::TextureId id; std::string_view path; };\n"
@@ -2781,18 +2763,17 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
   }
   os << "};\n\n";
   // The preamble + both manifests are shared; the panel function and the
-  // parity-walk twin differ only in their body (draw vs walk) and whether they
-  // take the rect-log. Emit each from the same decl+solve so the geometry is
-  // identical; the walk adds a src_path:src_line node() before each node's
-  // draws (see drawNodeHier).
+  // parity-walk twin differ only in their body (draw vs walk). Emit each
+  // from the same decl+solve so the geometry is identical; the walk adds a
+  // src_path:src_line node() before each node's draws (see drawNodeHier).
   const std::string nsClose = "} // namespace " + opt.ns + "\n";
   auto emitFn = [&](const std::string &name, const std::string &body,
-                    const char *bodyLabel, bool withLog) {
+                    const char *bodyLabel) {
     std::ostringstream f;
     f << "template <class Snapshot, class Sink>\n"
       << "void " << name
       << "(const Snapshot &s, float screenW, float screenH, Sink &sink"
-      << (withLog && opt.rectLog ? ", RectLog *log = nullptr" : "") << ") {\n"
+      << ") {\n"
       << "  using gen_detail::R;\n"
       << "  (void)s;\n"
       << "  const float W = screenW, H = screenH;\n"
@@ -2817,15 +2798,13 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
       << "// (it provides gen_detail, the manifests, and the schema).\n"
       << "namespace " << opt.ns << " {\n"
       << emitFn(fn + "_hier", e.walk.str(),
-                "  // ---- walk (hierarchy + per-node draws) ----\n",
-                /*withLog=*/false)
+                "  // ---- walk (hierarchy + per-node draws) ----\n")
       << nsClose;
     *hierOut = h.str();
   }
   return prefix +
          emitFn(fn, e.draw.str(),
-                "  // ---- draw (render order, absolute) ----\n",
-                /*withLog=*/true) +
+                "  // ---- draw (render order, absolute) ----\n") +
          nsClose;
 }
 

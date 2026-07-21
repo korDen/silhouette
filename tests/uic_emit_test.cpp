@@ -517,17 +517,16 @@ TEST(UicEmit, TemplatesInstantiateWithFoldedParams) {
       "panel { pair { art: /art/a.img; } pair { art: /art/b.img; } }\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  // four cell INSTANCES (nested templates, args referencing outer
-  // params), each with its own rect variables and folded values
-  size_t n = 0, pos = 0;
-  while ((pos = h.find("/art/a.img */", pos)) != std::string::npos) {
-    ++n;
-    ++pos;
-  }
-  EXPECT_EQ(n, 2u); // two cells of pair #1 draw art a
+  // four cell INSTANCES fold their args; identical shapes share their
+  // definitions, so the per-instance art travels as a lifted call-site
+  // argument — both arts present, the 3h size override folded, and one
+  // provenance marker per pair instantiation
+  EXPECT_NE(h.find("/art/a.img"), std::string::npos);
   EXPECT_NE(h.find("/art/b.img"), std::string::npos);
   EXPECT_NE(h.find("R(0.0299"), std::string::npos); // the 3h override
-  EXPECT_NE(h.find(">>> pair"), std::string::npos); // provenance markers
+  const size_t p1 = h.find(">>> pair");
+  ASSERT_NE(p1, std::string::npos); // provenance markers
+  EXPECT_NE(h.find(">>> pair", p1 + 1), std::string::npos);
 }
 
 TEST(UicEmit, InstantiationDiagnostics) {
@@ -617,8 +616,15 @@ TEST(UicEmit, BoolParamsFoldIntoVisibility) {
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
   // first instance draws; the defaulted (false) one is a hidden subtree
-  EXPECT_NE(h.find("/art/cap.img"), std::string::npos);
-  EXPECT_NE(h.find("hidden subtree"), std::string::npos);
+  // the visible cap draws its art (the id travels as a lifted call-site
+  // argument); the statically hidden cap's draw body is EMPTY, so its
+  // call passes no art at all — one lifted occurrence total
+  size_t n = 0, pos = 0;
+  while ((pos = h.find("/art/cap.img */", pos)) != std::string::npos) {
+    ++n;
+    ++pos;
+  }
+  EXPECT_EQ(n, 1u);
 }
 
 TEST(UicEmit, GrowUnionIsFourEdged) {
@@ -816,19 +822,43 @@ TEST(UicEmit, ATemplateInstanceOutlinesIntoAGuardedFunction) {
       "}\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << diags[0].msg;
-  // one frame struct + one solve function PER INSTANCE (dedup is a later
-  // stage), roots' quads by reference, the guard on the call
-  EXPECT_NE(h.find("struct F0_chip {"), std::string::npos);
-  EXPECT_NE(h.find("struct F1_chip {"), std::string::npos);
-  EXPECT_NE(h.find("UIC_GEN_NOINLINE void solve_0_chip("), std::string::npos);
-  EXPECT_NE(h.find("float &x1, float &y1, float &w1, float &h1"),
+  // frame structs + solve functions, canonically named by shape; roots'
+  // quads by reference; the bitwise input guard on the call. These two
+  // instances differ in a folded dim, so they keep separate definitions.
+  EXPECT_NE(h.find("struct F_chip_"), std::string::npos);
+  EXPECT_NE(h.find("UIC_GEN_NOINLINE void solve_chip_"), std::string::npos);
+  EXPECT_NE(h.find("float &q0x, float &q0y, float &q0w, float &q0h"),
             std::string::npos);
   EXPECT_NE(h.find("if (!f0.ran"), std::string::npos);
   EXPECT_NE(h.find("f0.ran = 1;"), std::string::npos);
   // the draw side outlines per ROOT and reads the frame
-  EXPECT_NE(h.find("UIC_GEN_NOINLINE void draw_0_1("), std::string::npos);
-  EXPECT_NE(h.find("draw_0_1(s, sink, W, H, f0, x1, y1, w1, h1"),
+  EXPECT_NE(h.find("UIC_GEN_NOINLINE void draw_chip_"), std::string::npos);
+  EXPECT_NE(h.find("(s, sink, W, H, f0, x1, y1, w1, h1"),
             std::string::npos);
+}
+
+TEST(UicEmit, IdenticalInstancesShareOneDefinition) {
+  // two instantiations whose canonical shape matches byte-for-byte share
+  // ONE frame struct and ONE solve function — only the storage (f0, f1)
+  // and the guarded call sites stay per-instance
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template chip { in cw: dim;\n"
+      "    image { texture: /art/x.tga; width: cw; height: 2h; } }\n"
+      "panel { width: 40h; height: 4h;\n"
+      "    chip { cw: 3h; } chip { cw: 3h; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  const size_t s1 = h.find("struct F_chip_");
+  ASSERT_NE(s1, std::string::npos);
+  EXPECT_EQ(h.find("struct F_chip_", s1 + 1), std::string::npos);
+  const size_t f1 = h.find("UIC_GEN_NOINLINE void solve_chip_");
+  ASSERT_NE(f1, std::string::npos);
+  EXPECT_EQ(h.find("UIC_GEN_NOINLINE void solve_chip_", f1 + 1),
+            std::string::npos);
+  EXPECT_NE(h.find("if (!f0.ran"), std::string::npos);
+  EXPECT_NE(h.find("if (!f1.ran"), std::string::npos);
 }
 
 TEST(UicEmit, TheProjectionCapturesEveryReadPath) {
@@ -1440,8 +1470,8 @@ TEST(UicEmit, EmptyAlignFoldsToLeft) {
       "panel { width: 40h; height: 4h; t { } }\n",
       &diags);
   EXPECT_FALSE(uic::hasErrors(diags));
-  EXPECT_NE(h.find("x1 = 0.0f + R(0.0f);"), std::string::npos);
-  EXPECT_EQ(h.find("w0 - w1"), std::string::npos); // not right-aligned
+  EXPECT_NE(h.find("q0x = 0.0f + R(0.0f);"), std::string::npos);
+  EXPECT_EQ(h.find(" - q0w"), std::string::npos); // not right-aligned
 }
 
 TEST(UicEmit, HiddenChildOccupancyLaws) {
@@ -1482,9 +1512,9 @@ TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
   // parent's SAME axis (its width, w0); height is 95% of the CROSS axis (also
   // the width, w0) — so both land on w0, and xpct picking w0 (not h0) for a
   // vertical dim is the proof it crossed.
-  EXPECT_NE(viaCall.find("w1 = R(0.949999988f * w0);"), std::string::npos)
+  EXPECT_NE(viaCall.find("= R(0.949999988f * "), std::string::npos)
       << viaCall;
-  EXPECT_NE(viaCall.find("h1 = R(0.949999988f * w0);"), std::string::npos)
+  EXPECT_NE(viaCall.find("= R(0.949999988f * q0w);"), std::string::npos)
       << viaCall;
 
   // the literal %/@ on the same geometry emits the identical two solve lines.

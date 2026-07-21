@@ -350,8 +350,27 @@ struct Emit {
   struct InstInfo {
     std::string structName, fnName, fvar;
     std::set<std::string> members;
+    // original member name -> canonical member name (m0, m1, ...): the
+    // draw/walk outlines rewrite through this so every instance of a
+    // shared frame struct speaks the struct's own field names
+    std::map<std::string, std::string> canonMembers;
+    // the lifted call-site arguments the shared solve function takes
+    // beyond roots and outers (id literals, snapshot subobjects)
+    std::vector<std::string> liftedArgs;
   };
   std::map<int, InstInfo> instInfo;
+  // canonical-body hash -> shared definition names (solve side), and the
+  // same for per-root draw bodies. Instances whose canonical form is
+  // byte-identical share one struct + one function; anything that still
+  // differs (a structurally different variant, an unlifted literal)
+  // simply hashes apart and keeps its own — under-sharing is the only
+  // failure mode.
+  std::map<std::string, std::pair<std::string, std::string>> solveShared;
+  std::map<std::string, std::string> drawShared;
+  // frame structs dedup on their OWN text: two share-keys can differ in
+  // body while agreeing on layout, and one definition must serve both
+  std::map<std::string, std::string> structShared;
+  int sharedCount = 0;
   int currentDrawInst = -1; // innermost instance the draw walk is inside
   std::map<std::string, uint32_t> texIds;
   std::vector<std::string> texOrder;
@@ -1399,6 +1418,182 @@ struct Emit {
     return outText;
   }
 
+  // ---- canonicalization for instance sharing ----------------------------
+
+  // Strip // line comments (they carry per-instance provenance) outside
+  // string literals.
+  static std::string stripLineComments(const std::string &text) {
+    std::string out;
+    out.reserve(text.size());
+    size_t i = 0;
+    const size_t n = text.size();
+    while (i < n) {
+      const char c = text[i];
+      if (c == '"') {
+        const size_t start = i++;
+        while (i < n && !(text[i] == '"' && text[i - 1] != '\\')) {
+          ++i;
+        }
+        if (i < n) {
+          ++i;
+        }
+        out.append(text, start, i - start);
+        continue;
+      }
+      if (c == '/' && i + 1 < n && text[i + 1] == '/') {
+        while (i < n && text[i] != '\n') {
+          ++i;
+        }
+        // trim trailing spaces the comment left behind
+        while (!out.empty() && out.back() == ' ') {
+          out.pop_back();
+        }
+        continue;
+      }
+      out += c;
+      ++i;
+    }
+    // collapse blank lines the stripped comments left
+    std::string out2;
+    out2.reserve(out.size());
+    bool atLineStart = true;
+    for (size_t k = 0; k < out.size(); ++k) {
+      if (out[k] == '\n' && atLineStart) {
+        continue;
+      }
+      out2 += out[k];
+      atLineStart = out[k] == '\n';
+    }
+    return out2;
+  }
+
+  // Lift the texts that vary between instances of one template into
+  // ordered call-site arguments: 0x........u id literals (with their
+  // trailing /* name */ tag) and snapshot array-element prefixes
+  // (`s.<chain>[(<idx>)]`). The body references a0, a1, ... / sr0.<rest>;
+  // the caller passes the concrete literal / subobject.
+  static std::string liftVarying(std::string text,
+                                 std::vector<std::string> &idArgs,
+                                 std::vector<std::string> &subArgs) {
+    std::map<std::string, std::string> idMap, subMap;
+    std::string out;
+    out.reserve(text.size());
+    const size_t n = text.size();
+    size_t i = 0;
+    auto hexAt = [&](size_t p, size_t &len, size_t &fullLen) {
+      if (p + 3 >= n || text[p] != '0' || text[p + 1] != 'x') {
+        return false;
+      }
+      size_t q = p + 2;
+      while (q < n && ((text[q] >= '0' && text[q] <= '9') ||
+                       (text[q] >= 'A' && text[q] <= 'F'))) {
+        ++q;
+      }
+      if (q == p + 2 || q >= n || text[q] != 'u') {
+        return false;
+      }
+      len = q + 1 - p;
+      fullLen = len;
+      // fold an immediately-following /* name */ tag into the argument
+      size_t r = q + 1;
+      while (r < n && text[r] == ' ') {
+        ++r;
+      }
+      if (r + 1 < n && text[r] == '/' && text[r + 1] == '*') {
+        const size_t close = text.find("*/", r + 2);
+        if (close != std::string::npos) {
+          fullLen = close + 2 - p;
+        }
+      }
+      return true;
+    };
+    while (i < n) {
+      const char c = text[i];
+      if (c == '"') {
+        const size_t start = i++;
+        while (i < n && !(text[i] == '"' && text[i - 1] != '\\')) {
+          ++i;
+        }
+        if (i < n) {
+          ++i;
+        }
+        out.append(text, start, i - start);
+        continue;
+      }
+      const bool identBefore =
+          i > 0 && (((text[i - 1] >= 'a' && text[i - 1] <= 'z') ||
+                     (text[i - 1] >= 'A' && text[i - 1] <= 'Z') ||
+                     (text[i - 1] >= '0' && text[i - 1] <= '9') ||
+                     text[i - 1] == '_' || text[i - 1] == '.'));
+      size_t hexLen = 0, hexFull = 0;
+      if (!identBefore && hexAt(i, hexLen, hexFull)) {
+        const std::string key = text.substr(i, hexFull);
+        auto it = idMap.find(key);
+        if (it == idMap.end()) {
+          const std::string name = "lid" + std::to_string(idArgs.size());
+          idArgs.push_back(text.substr(i, hexFull));
+          it = idMap.emplace(key, name).first;
+        }
+        out += it->second;
+        i += hexFull;
+        continue;
+      }
+      if (c == 's' && !identBefore && i + 1 < n && text[i + 1] == '.') {
+        // walk the chain; stop after the FIRST [(idx)] segment — that is
+        // the varying element; the rest of the path stays in the body
+        size_t p = i + 2;
+        bool sawIndex = false;
+        while (p < n && !sawIndex) {
+          if ((text[p] >= 'a' && text[p] <= 'z') ||
+              (text[p] >= 'A' && text[p] <= 'Z') ||
+              (text[p] >= '0' && text[p] <= '9') || text[p] == '_' ||
+              text[p] == '.') {
+            ++p;
+          } else if (text[p] == '[') {
+            int depth = 0;
+            do {
+              if (text[p] == '[') {
+                ++depth;
+              } else if (text[p] == ']') {
+                --depth;
+              }
+              ++p;
+            } while (p < n && depth > 0);
+            sawIndex = true;
+          } else {
+            break;
+          }
+        }
+        if (sawIndex) {
+          const std::string key = text.substr(i, p - i);
+          auto it = subMap.find(key);
+          if (it == subMap.end()) {
+            const std::string name = "sr" + std::to_string(subArgs.size());
+            subArgs.push_back(key);
+            it = subMap.emplace(key, name).first;
+          }
+          out += it->second;
+          i = p;
+          continue;
+        }
+      }
+      out += c;
+      ++i;
+    }
+    return out;
+  }
+
+  static std::string fnv64(const std::string &s) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) {
+      h ^= c;
+      h *= 1099511628211ull;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", (unsigned long long)h);
+    return std::string(buf, 8); // 8 hex chars is plenty at this scale
+  }
+
   // Declaration lines -> re-initialization statements: "  float a = 0,
   // b = -1.f;" becomes "a = 0; b = -1.f;", a frame-typed line "  F3_x f3;"
   // becomes "f3.reset();". Used by the frame/context reset methods so a
@@ -1728,68 +1923,183 @@ struct Emit {
       }
     }
 
-    // Outer references: generated identifiers the fragment reads that are
-    // neither members, nor root quads, nor declared inside the fragment —
-    // the enclosing chain cursor, ancestor dims, an enclosing pass
-    // counter. They become const parameters with their own names, so the
-    // fragment text needs no rewriting for them (and when the CALLER is
-    // itself a frame, its own rewrite prefixes the argument).
-    const std::set<std::string> localDecls = declaredInside(fSolve);
-    std::vector<std::string> outers;
-    std::set<std::string> seenOuter;
-    rewriteIdents(fSolve, [&](const std::string &t) -> std::string {
-      if (isGenIdent(t) && info.members.find(t) == info.members.end() &&
-          rootQuads.find(t) == rootQuads.end() &&
-          localDecls.find(t) == localDecls.end() &&
-          seenOuter.insert(t).second) {
-        outers.push_back(t);
-      }
-      return t;
-    });
+    // ---- canonicalize: same template, same shape => ONE definition ----
+    // Comments (per-instance provenance) strip; varying id literals and
+    // snapshot subobjects lift into ordered arguments; every generated
+    // identifier renames positionally (roots q<k>*, members m<k>, locals
+    // keep their own declarations, outers a<k>). Two instances whose
+    // canonical struct+body match byte-for-byte share one frame struct and
+    // one solve function; anything that still differs hashes apart and
+    // keeps its own — under-sharing is the only failure mode.
+    std::vector<std::string> idArgs, subArgs;
+    std::string cBody = liftVarying(stripLineComments(fSolve), idArgs,
+                                    subArgs);
+    const std::string cStructSrc = stripLineComments(memberLines);
+    const std::set<std::string> localDecls = declaredInside(cBody);
 
-    const std::string body =
-        rewriteIdents(fSolve, [&](const std::string &t) -> std::string {
-          return info.members.find(t) != info.members.end() ? "f." + t : t;
+    std::map<std::string, std::string> ren;
+    int mN = 0, aN = 0;
+    std::vector<std::string> outerOrig;  // caller-side arg per a<k>
+    std::vector<std::string> outerCanon; // a<k>
+    {
+      size_t rk = 0;
+      for (SolvedW *r : roots) {
+        const std::string rs = std::to_string(r->idx);
+        const std::string q = "q" + std::to_string(rk++);
+        ren["x" + rs] = q + "x";
+        ren["y" + rs] = q + "y";
+        ren["w" + rs] = q + "w";
+        ren["h" + rs] = q + "h";
+      }
+      rewriteIdents(cStructSrc, [&](const std::string &t) -> std::string {
+        if (isGenIdent(t) && ren.find(t) == ren.end()) {
+          ren[t] = "m" + std::to_string(mN++);
+        }
+        return t;
+      });
+      auto isLifted = [](const std::string &t) {
+        size_t p = 0;
+        if (t.rfind("lid", 0) == 0) {
+          p = 3;
+        } else if (t.rfind("sr", 0) == 0) {
+          p = 2;
+        } else {
+          return false;
+        }
+        if (p >= t.size()) {
+          return false;
+        }
+        for (; p < t.size(); ++p) {
+          if (t[p] < '0' || t[p] > '9') {
+            return false; // src40 is a run source, not a lifted subobject
+          }
+        }
+        return true;
+      };
+      rewriteIdents(cBody, [&](const std::string &t) -> std::string {
+        if (!isGenIdent(t) || ren.find(t) != ren.end() || isLifted(t)) {
+          return t;
+        }
+        if (localDecls.find(t) != localDecls.end()) {
+          ren[t] = t; // fragment-local: its own declaration renames with it
+          return t;
+        }
+        ren[t] = "a" + std::to_string(aN++);
+        outerOrig.push_back(t);
+        outerCanon.push_back(ren[t]);
+        return t;
+      });
+    }
+    // fragment-locals keep original names (declared inside; unique per
+    // shared body is not required — but they ARE instance-numbered, so
+    // canonicalize them too for the hash to meet
+    {
+      int lN = 0;
+      for (auto &kv : ren) {
+        if (kv.first == kv.second && localDecls.count(kv.first) != 0) {
+          kv.second = "l" + std::to_string(lN++);
+        }
+      }
+    }
+    auto applyRen = [&](const std::string &text) {
+      return rewriteIdents(text, [&](const std::string &t) -> std::string {
+        const auto it = ren.find(t);
+        return it != ren.end() ? it->second : t;
+      });
+    };
+    std::string canonStruct = applyRen(cStructSrc);
+    std::string canonBody = applyRen(cBody);
+    // members access through the frame parameter
+    std::set<std::string> canonMemberSet;
+    for (const auto &kv : ren) {
+      if (kv.second[0] == 'm' && info.members.count(kv.first) != 0) {
+        canonMemberSet.insert(kv.second);
+        info.canonMembers[kv.first] = kv.second;
+      }
+    }
+    canonBody =
+        rewriteIdents(canonBody, [&](const std::string &t) -> std::string {
+          return canonMemberSet.count(t) != 0 ? "f." + t : t;
         });
 
-    frameDefs << "struct " << info.structName << " {\n"
-              << memberLines << "  int ran = 0;\n";
-    for (size_t k = 0; k < outers.size(); ++k) {
-      if (!frameRefType(outers[k], true).empty()) {
-        continue; // a frame is storage, not an input value
-      }
-      frameDefs << "  " << (isIntFamily(outers[k]) ? "int" : "float")
-                << " li" << k << " = 0;\n";
-    }
-    // reset(): re-establish every member's initializer and recurse into
-    // nested frames — a reset frame is indistinguishable from a freshly
-    // constructed one. A retained context calls this whenever its layout
-    // projection dirties, so a solve-dirty frame re-converges from scratch
-    // exactly like the stateless path; a solve-clean frame touches none
-    // of it.
-    frameDefs << "  void reset() {\n    ran = 0;\n"
-              << declsToResets(memberLines, "    ") << "  }\n};\n\n";
-
-    frameDefs << "template <class Snapshot, class Sink>\n"
-              << "UIC_GEN_NOINLINE void " << info.fnName
-              << "(const Snapshot &s, Sink &sink, float W, float H, "
-              << info.structName << " &f";
-    for (SolvedW *r : roots) {
-      const std::string rs = std::to_string(r->idx);
-      frameDefs << ", float &x" << rs << ", float &y" << rs << ", float &w"
-                << rs << ", float &h" << rs;
-    }
-    for (const std::string &o : outers) {
+    // the sharing key: template + shape + canonical text + arity
+    std::string typeSig;
+    for (const std::string &o : outerOrig) {
       const std::string fr = frameRefType(o, true);
-      if (!fr.empty()) {
-        frameDefs << ", " << fr << o;
-      } else {
-        frameDefs << ", const " << (isIntFamily(o) ? "int " : "float ") << o;
-      }
+      typeSig += fr.empty() ? (isIntFamily(o) ? "i" : "f") : ("R" + fr);
     }
-    frameDefs << ") {\n  using gen_detail::R;\n"
-              << "  (void)s; (void)sink; (void)W; (void)H; (void)f;\n"
-              << body << "}\n\n";
+    const std::string key =
+        fo.tname + "|" + std::to_string(roots.size()) + "|" + typeSig + "|" +
+        std::to_string(idArgs.size()) + "," + std::to_string(subArgs.size()) +
+        "|" + fnv64(canonStruct + "\x1f" + canonBody);
+
+    const auto hit = solveShared.find(key);
+    if (hit != solveShared.end()) {
+      info.structName = hit->second.first;
+      info.fnName = hit->second.second;
+      ++sharedCount;
+    } else {
+      // the struct dedups on its own text (with the guard-slot layout,
+      // which the outer types decide)
+      const std::string structKey = canonStruct + "\x1f" + typeSig;
+      const auto sHit = structShared.find(structKey);
+      if (sHit != structShared.end()) {
+        info.structName = sHit->second;
+      } else {
+        info.structName = "F_" + fo.tname + "_" + fnv64(structKey);
+        structShared.emplace(structKey, info.structName);
+        frameDefs << "struct " << info.structName << " {\n"
+                  << canonStruct << "  int ran = 0;\n";
+        for (size_t k = 0; k < outerOrig.size(); ++k) {
+          if (!frameRefType(outerOrig[k], true).empty()) {
+            continue; // a frame is storage, not an input value
+          }
+          frameDefs << "  " << (isIntFamily(outerOrig[k]) ? "int" : "float")
+                    << " li" << k << " = 0;\n";
+        }
+        // reset(): re-establish every member's initializer and recurse
+        // into nested frames — a reset frame is indistinguishable from a
+        // freshly constructed one.
+        frameDefs << "  void reset() {\n    ran = 0;\n"
+                  << declsToResets(canonStruct, "    ") << "  }\n};\n\n";
+      }
+      info.fnName = "solve_" + fo.tname + "_" + fnv64(key);
+      solveShared.emplace(key,
+                          std::make_pair(info.structName, info.fnName));
+
+      frameDefs << "template <class Snapshot, class Sink";
+      for (size_t k = 0; k < subArgs.size(); ++k) {
+        frameDefs << ", class SR" << k;
+      }
+      frameDefs << ">\n"
+                << "UIC_GEN_NOINLINE void " << info.fnName
+                << "(const Snapshot &s, Sink &sink, float W, float H, "
+                << info.structName << " &f";
+      for (size_t k = 0; k < roots.size(); ++k) {
+        const std::string q = "q" + std::to_string(k);
+        frameDefs << ", float &" << q << "x, float &" << q << "y, float &"
+                  << q << "w, float &" << q << "h";
+      }
+      for (size_t k = 0; k < outerOrig.size(); ++k) {
+        const std::string fr = frameRefType(outerOrig[k], true);
+        if (!fr.empty()) {
+          frameDefs << ", " << fr << outerCanon[k];
+        } else {
+          frameDefs << ", const "
+                    << (isIntFamily(outerOrig[k]) ? "int " : "float ")
+                    << outerCanon[k];
+        }
+      }
+      for (size_t k = 0; k < idArgs.size(); ++k) {
+        frameDefs << ", const uint32_t lid" << k;
+      }
+      for (size_t k = 0; k < subArgs.size(); ++k) {
+        frameDefs << ", const SR" << k << " &sr" << k;
+      }
+      frameDefs << ") {\n  using gen_detail::R;\n"
+                << "  (void)s; (void)sink; (void)W; (void)H; (void)f;\n"
+                << canonBody << "}\n\n";
+    }
 
     // The parent: frame storage, then the input-guarded call between the
     // provenance markers.
@@ -1797,28 +2107,37 @@ struct Emit {
     solveLine("// >>> " + fo.tname + " :" + std::to_string(line));
     std::string cond = "!" + info.fvar + ".ran";
     std::string saves = info.fvar + ".ran = 1;";
-    for (size_t k = 0; k < outers.size(); ++k) {
-      if (!frameRefType(outers[k], true).empty()) {
+    for (size_t k = 0; k < outerOrig.size(); ++k) {
+      if (!frameRefType(outerOrig[k], true).empty()) {
         continue;
       }
       const std::string li = info.fvar + ".li" + std::to_string(k);
-      cond += isIntFamily(outers[k])
-                  ? " || " + li + " != " + outers[k]
-                  : " || !gen_detail::feq(" + li + ", " + outers[k] + ")";
-      saves += " " + li + " = " + outers[k] + ";";
+      cond += isIntFamily(outerOrig[k])
+                  ? " || " + li + " != " + outerOrig[k]
+                  : " || !gen_detail::feq(" + li + ", " + outerOrig[k] + ")";
+      saves += " " + li + " = " + outerOrig[k] + ";";
     }
     std::string call = info.fnName + "(s, sink, W, H, " + info.fvar;
     for (SolvedW *r : roots) {
       const std::string rs = std::to_string(r->idx);
       call += ", x" + rs + ", y" + rs + ", w" + rs + ", h" + rs;
     }
-    for (const std::string &o : outers) {
+    for (const std::string &o : outerOrig) {
       call += ", " + o;
+    }
+    for (const std::string &a : idArgs) {
+      call += ", " + a;
+    }
+    for (const std::string &a : subArgs) {
+      call += ", " + a;
     }
     call += ");";
     solveLine("if (" + cond + ") { " + saves + " " + call + " }");
     solveLine("// <<< " + fo.tname);
-    solveScan += body;
+    solveScan += canonBody;
+    for (const std::string &a : subArgs) {
+      solveScan += a + "\n"; // the lifted paths still count as solve reads
+    }
   }
 
   static bool isIntFamily(const std::string &t) {
@@ -2772,57 +3091,170 @@ struct Emit {
 
     const InstInfo &info = instInfo.at(sw.instId);
     const std::string rs = std::to_string(sw.idx);
-    const std::set<std::string> rootQuad = {"x" + rs, "y" + rs, "w" + rs,
-                                            "h" + rs};
-    const std::set<std::string> localDecls = declaredInside(frag);
-    std::vector<std::string> outers;
-    std::set<std::string> seenOuter;
-    rewriteIdents(frag, [&](const std::string &t) -> std::string {
-      if (isGenIdent(t) && info.members.find(t) == info.members.end() &&
-          rootQuad.find(t) == rootQuad.end() &&
-          localDecls.find(t) == localDecls.end() &&
-          seenOuter.insert(t).second) {
-        outers.push_back(t);
+
+    // members speak the shared struct's canonical names in BOTH walks
+    std::set<std::string> canonSet;
+    std::string body =
+        rewriteIdents(frag, [&](const std::string &t) -> std::string {
+          const auto it = info.canonMembers.find(t);
+          if (it == info.canonMembers.end()) {
+            return t;
+          }
+          canonSet.insert(it->second);
+          return "f." + it->second;
+        });
+
+    if (hier) {
+      // the parity walk keeps provenance comments and per-instance node
+      // strings — one function per root, no sharing
+      const std::set<std::string> localDecls = declaredInside(body);
+      std::vector<std::string> outers;
+      std::set<std::string> seenOuter;
+      const std::set<std::string> rootQuad = {"x" + rs, "y" + rs, "w" + rs,
+                                              "h" + rs};
+      rewriteIdents(body, [&](const std::string &t) -> std::string {
+        if (isGenIdent(t) && rootQuad.find(t) == rootQuad.end() &&
+            localDecls.find(t) == localDecls.end() &&
+            seenOuter.insert(t).second) {
+          outers.push_back(t);
+        }
+        return t;
+      });
+      const std::string fn =
+          "walk_" + std::to_string(sw.instId) + "_" + rs;
+      walkFnDefs << "template <class Snapshot, class Sink>\n"
+                 << "UIC_GEN_NOINLINE void " << fn
+                 << "(const Snapshot &s, Sink &sink, float W, float H, const "
+                 << info.structName << " &f, const float x" << rs
+                 << ", const float y" << rs << ", const float w" << rs
+                 << ", const float h" << rs;
+      for (const std::string &o : outers) {
+        const std::string fr = frameRefType(o, false);
+        walkFnDefs << ", "
+                   << (fr.empty() ? std::string("const ") +
+                                        (isIntFamily(o) ? "int " : "float ")
+                                  : fr)
+                   << o;
+      }
+      walkFnDefs << ") {\n  using gen_detail::R;\n"
+                 << "  (void)s; (void)sink; (void)W; (void)H; (void)f;\n"
+                 << "  (void)x" << rs << "; (void)y" << rs << "; (void)w"
+                 << rs << "; (void)h" << rs << ";\n"
+                 << body << "}\n\n";
+      std::string call = fn + "(s, sink, W, H, " + info.fvar + ", x" + rs +
+                         ", y" + rs + ", w" + rs + ", h" + rs;
+      for (const std::string &o : outers) {
+        call += ", " + o;
+      }
+      call += ");";
+      drawLine(call);
+      return;
+    }
+
+    // the render walk canonicalizes and SHARES: instances of one frame
+    // struct whose draw shape matches byte-for-byte call one function
+    std::vector<std::string> idArgs, subArgs;
+    body = liftVarying(stripLineComments(body), idArgs, subArgs);
+    const std::set<std::string> localDecls = declaredInside(body);
+    std::map<std::string, std::string> ren;
+    ren["x" + rs] = "q0x";
+    ren["y" + rs] = "q0y";
+    ren["w" + rs] = "q0w";
+    ren["h" + rs] = "q0h";
+    int aN = 0, lN = 0;
+    std::vector<std::string> outerOrig, outerCanon;
+    rewriteIdents(body, [&](const std::string &t) -> std::string {
+      if (!isGenIdent(t) || ren.find(t) != ren.end() ||
+          canonSet.count(t) != 0) {
+        return t;
+      }
+      if (t.rfind("lid", 0) == 0 || t.rfind("sr", 0) == 0) {
+        bool digits = true;
+        for (size_t k = t[0] == 'l' ? 3 : 2; k < t.size(); ++k) {
+          digits = digits && t[k] >= '0' && t[k] <= '9';
+        }
+        if (digits) {
+          return t;
+        }
+      }
+      if (localDecls.find(t) != localDecls.end()) {
+        ren[t] = "l" + std::to_string(lN++);
+      } else {
+        ren[t] = "a" + std::to_string(aN++);
+        outerOrig.push_back(t);
+        outerCanon.push_back(ren[t]);
       }
       return t;
     });
-    const std::string body =
-        rewriteIdents(frag, [&](const std::string &t) -> std::string {
-          return info.members.find(t) != info.members.end() ? "f." + t : t;
-        });
+    body = rewriteIdents(body, [&](const std::string &t) -> std::string {
+      const auto it = ren.find(t);
+      return it != ren.end() ? it->second : t;
+    });
 
-    const std::string fn = (hier ? "walk_" : "draw_") +
-                           std::to_string(sw.instId) + "_" + rs;
-    std::ostringstream &defs = hier ? walkFnDefs : drawFnDefs;
-    defs << "template <class Snapshot, class Sink>\n"
-         << "UIC_GEN_NOINLINE void " << fn
-         << "(const Snapshot &s, Sink &sink, float W, float H, const "
-         << info.structName << " &f, const float x" << rs
-         << ", const float y" << rs << ", const float w" << rs
-         << ", const float h" << rs;
-    for (const std::string &o : outers) {
+    std::string typeSig;
+    for (const std::string &o : outerOrig) {
       const std::string fr = frameRefType(o, false);
-      if (!fr.empty()) {
-        defs << ", " << fr << o;
-      } else {
-        defs << ", const " << (isIntFamily(o) ? "int " : "float ") << o;
-      }
+      typeSig += fr.empty() ? (isIntFamily(o) ? "i" : "f") : ("R" + fr);
     }
-    defs << ") {\n  using gen_detail::R;\n"
-         << "  (void)s; (void)sink; (void)W; (void)H; (void)f;\n"
-         << "  (void)x" << rs << "; (void)y" << rs << "; (void)w" << rs
-         << "; (void)h" << rs << ";\n"
-         << body << "}\n\n";
-
+    const std::string key = info.structName + "|" + typeSig + "|" +
+                            std::to_string(idArgs.size()) + "," +
+                            std::to_string(subArgs.size()) + "|" +
+                            fnv64(body);
+    std::string fn;
+    const auto hit = drawShared.find(key);
+    if (hit != drawShared.end()) {
+      fn = hit->second;
+      ++sharedCount;
+    } else {
+      fn = "draw_" + info.structName.substr(2) + "_" + fnv64(key);
+      drawShared.emplace(key, fn);
+      std::ostringstream &defs = drawFnDefs;
+      defs << "template <class Snapshot, class Sink";
+      for (size_t k = 0; k < subArgs.size(); ++k) {
+        defs << ", class SR" << k;
+      }
+      defs << ">\n"
+           << "UIC_GEN_NOINLINE void " << fn
+           << "(const Snapshot &s, Sink &sink, float W, float H, const "
+           << info.structName
+           << " &f, const float q0x, const float q0y, const float q0w, "
+              "const float q0h";
+      for (size_t k = 0; k < outerOrig.size(); ++k) {
+        const std::string fr = frameRefType(outerOrig[k], false);
+        defs << ", "
+             << (fr.empty() ? std::string("const ") +
+                                  (isIntFamily(outerOrig[k]) ? "int "
+                                                             : "float ")
+                            : fr)
+             << outerCanon[k];
+      }
+      for (size_t k = 0; k < idArgs.size(); ++k) {
+        defs << ", const uint32_t lid" << k;
+      }
+      for (size_t k = 0; k < subArgs.size(); ++k) {
+        defs << ", const SR" << k << " &sr" << k;
+      }
+      defs << ") {\n  using gen_detail::R;\n"
+           << "  (void)s; (void)sink; (void)W; (void)H; (void)f;\n"
+           << "  (void)q0x; (void)q0y; (void)q0w; (void)q0h;\n"
+           << body << "}\n\n";
+    }
     std::string call = fn + "(s, sink, W, H, " + info.fvar + ", x" + rs +
                        ", y" + rs + ", w" + rs + ", h" + rs;
-    for (const std::string &o : outers) {
+    for (const std::string &o : outerOrig) {
       call += ", " + o;
+    }
+    for (const std::string &a : idArgs) {
+      call += ", " + a;
+    }
+    for (const std::string &a : subArgs) {
+      call += ", " + a;
     }
     call += ");";
     drawLine(call);
-    if (!hier) {
-      drawScan += body;
+    drawScan += body;
+    for (const std::string &a : subArgs) {
+      drawScan += a + "\n"; // lifted paths still count as draw reads
     }
   }
 

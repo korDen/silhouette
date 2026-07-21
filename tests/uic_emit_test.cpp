@@ -801,6 +801,36 @@ TEST(UicEmit, FitxLabelsMeasureInTheSolve) {
   EXPECT_NE(h.find("tx0 = x1; ty0 = y1; tw0 = w1;"), std::string::npos);
 }
 
+TEST(UicEmit, ATemplateInstanceOutlinesIntoAGuardedFunction) {
+  // every template instantiation outlines: interior variables move into a
+  // frame struct, the solve becomes a noinline function taking the roots'
+  // quads by reference, and the call is guarded on bitwise input equality
+  // — re-running an instance whose inputs did not change would recompute
+  // identical values, so the guard skips it (the nested-grow 2^depth fix)
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "template chip { in cw: dim;\n"
+      "    image { texture: /art/x.tga; width: cw; height: 2h; } }\n"
+      "panel { width: 40h; height: 4h; grow: 1;\n"
+      "    chip { cw: 3h; } chip { cw: 4h; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  // one frame struct + one solve function PER INSTANCE (dedup is a later
+  // stage), roots' quads by reference, the guard on the call
+  EXPECT_NE(h.find("struct F0_chip {"), std::string::npos);
+  EXPECT_NE(h.find("struct F1_chip {"), std::string::npos);
+  EXPECT_NE(h.find("UIC_GEN_NOINLINE void solve_0_chip("), std::string::npos);
+  EXPECT_NE(h.find("float &x1, float &y1, float &w1, float &h1"),
+            std::string::npos);
+  EXPECT_NE(h.find("if (!f0.ran"), std::string::npos);
+  EXPECT_NE(h.find("f0.ran = 1;"), std::string::npos);
+  // the draw side outlines per ROOT and reads the frame
+  EXPECT_NE(h.find("UIC_GEN_NOINLINE void draw_0_1("), std::string::npos);
+  EXPECT_NE(h.find("draw_0_1(s, sink, W, H, f0, x1, y1, w1, h1"),
+            std::string::npos);
+}
+
 TEST(UicEmit, FityMemoizesTheLineHeightPerFrame) {
   // fity sizes to the font cell; the line_height result cannot change
   // within a frame, so it is memoized per site exactly like the fitx

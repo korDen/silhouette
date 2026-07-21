@@ -293,6 +293,10 @@ struct SolvedW {
   bool reverse = false;
   // a widgetstate layer: excluded from unions and float chains
   bool isState = false;
+  // template-instance identity: set on an instance's top-level widgets so
+  // the draw walk can outline each root's subtree into its own function
+  // (the solve was outlined when the instance closed). -1 = not a root.
+  int instId = -1;
 };
 
 // the enclosing float chain, threaded to children: axis, the parent's
@@ -318,6 +322,33 @@ struct Emit {
   // diff. Built by a second pass that retargets drawLine here via drawOut.
   std::ostringstream walk;
   std::ostringstream *drawOut = &draw;
+  // ---- the instance outline (one function pair per template instance) ----
+  // Each template instantiation's solve is outlined into its own function
+  // with a plain-struct "frame" holding every interior variable; the parent
+  // keeps the instance ROOTS' rect quads (its epilogues read them by name)
+  // and calls the function through an input-keyed guard: re-running an
+  // instance whose inputs are bitwise-unchanged would recompute identical
+  // values, so the guarded call skips it — that collapses the 2^depth
+  // re-execution of nested grow passes to convergence-only work, with
+  // byte-identical output by construction. Draw/walk outline per ROOT.
+  std::ostringstream frameDefs;  // frame structs + solve_ functions
+  std::ostringstream drawFnDefs; // draw_ functions (render header)
+  std::ostringstream walkFnDefs; // walk_ functions (hier header)
+  int instCount = 0;
+  struct InstOpen {
+    std::string tname;
+    int id = 0;
+    int startVar = 0;
+    size_t outBefore = 0;
+    std::string savedDecl, savedSolve;
+  };
+  std::vector<InstOpen> instOpen;
+  struct InstInfo {
+    std::string structName, fnName, fvar;
+    std::set<std::string> members;
+  };
+  std::map<int, InstInfo> instInfo;
+  int currentDrawInst = -1; // innermost instance the draw walk is inside
   std::map<std::string, uint32_t> texIds;
   std::vector<std::string> texOrder;
   std::map<std::string, uint32_t> fontIds; // name -> id (content hash)
@@ -1285,6 +1316,351 @@ struct Emit {
     return nullptr;
   }
 
+  // ---- the instance outline: text mechanics -----------------------------
+
+  // A generated-code identifier: a lowercase run glued to digits (x12,
+  // mw13, tx4, pass9, hasT4, f3). Everything the emitter mints fits this
+  // shape; nothing else in the emitted text does (font/texture names sit
+  // inside string literals, which the scanner skips).
+  static bool isGenIdent(const std::string &t) {
+    if (t.empty() || t[0] < 'a' || t[0] > 'z') {
+      return false;
+    }
+    size_t i = 1;
+    while (i < t.size() && ((t[i] >= 'a' && t[i] <= 'z') ||
+                            (t[i] >= 'A' && t[i] <= 'Z'))) {
+      ++i;
+    }
+    if (i == t.size()) {
+      return false; // letters only — a keyword or a call, never a var
+    }
+    for (size_t k = i; k < t.size(); ++k) {
+      if (t[k] < '0' || t[k] > '9') {
+        return false; // letters after the digits: a hex literal's tail
+      }
+    }
+    return true;
+  }
+
+  // Walk `text` outside string literals and line comments, calling
+  // `onIdent` for every full identifier token; the callback returns the
+  // replacement text (or the token itself to leave it alone).
+  static std::string rewriteIdents(
+      const std::string &text,
+      const std::function<std::string(const std::string &)> &onIdent) {
+    std::string outText;
+    outText.reserve(text.size() + text.size() / 8);
+    const size_t n = text.size();
+    size_t i = 0;
+    while (i < n) {
+      const char c = text[i];
+      if (c == '"') { // string literal: copy verbatim
+        const size_t start = i++;
+        while (i < n && !(text[i] == '"' && text[i - 1] != '\\')) {
+          ++i;
+        }
+        if (i < n) {
+          ++i;
+        }
+        outText.append(text, start, i - start);
+        continue;
+      }
+      if (c == '/' && i + 1 < n && text[i + 1] == '/') { // line comment
+        const size_t start = i;
+        while (i < n && text[i] != '\n') {
+          ++i;
+        }
+        outText.append(text, start, i - start);
+        continue;
+      }
+      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+        const bool glued = i > 0 && (text[i - 1] == '.' || text[i - 1] == ':');
+        const size_t start = i;
+        while (i < n && ((text[i] >= 'a' && text[i] <= 'z') ||
+                         (text[i] >= 'A' && text[i] <= 'Z') ||
+                         (text[i] >= '0' && text[i] <= '9') ||
+                         text[i] == '_')) {
+          ++i;
+        }
+        const std::string tok = text.substr(start, i - start);
+        // a token reached through '.' or '::' is a member/scope access
+        // (s.unit..., gen_detail::sv, f.x12 after an earlier rewrite) and
+        // never one of ours to touch
+        outText += glued ? tok : onIdent(tok);
+        continue;
+      }
+      outText += c;
+      ++i;
+    }
+    return outText;
+  }
+
+  // Identifiers a fragment DECLARES itself (loop counters, epilogue
+  // locals, draw locals): `for (int pass9`, `const float nx13 = `,
+  // `const auto src40 = `.
+  static std::set<std::string> declaredInside(const std::string &text) {
+    std::set<std::string> out;
+    // every declaration form the emitter writes into a solve/draw body:
+    // scalars, epilogue locals, loop counters, hoisted run sources, pens
+    // and colours (`const ui::Vec2 pen…`, `const ui::Color …`)
+    static const char *kinds[] = {"int ", "float ", "auto ", "Vec2 ",
+                                  "Color "};
+    for (const char *kind : kinds) {
+      size_t p = 0;
+      const std::string k = kind;
+      while ((p = text.find(k, p)) != std::string::npos) {
+        size_t q = p + k.size();
+        // walk the whole declaration: `float a = <expr>, b = <expr>;` —
+        // every comma at initializer depth 0 introduces another declarator
+        for (;;) {
+          const size_t nameStart = q;
+          while (q < text.size() &&
+                 ((text[q] >= 'a' && text[q] <= 'z') ||
+                  (text[q] >= 'A' && text[q] <= 'Z') ||
+                  (text[q] >= '0' && text[q] <= '9'))) {
+            ++q;
+          }
+          if (q == nameStart) {
+            break;
+          }
+          out.insert(text.substr(nameStart, q - nameStart));
+          int depth = 0;
+          bool more = false;
+          while (q < text.size()) {
+            const char c = text[q++];
+            if (c == '(' || c == '{') {
+              ++depth;
+            } else if (c == ')' || c == '}') {
+              --depth;
+            } else if (c == ',' && depth == 0) {
+              more = true;
+              break;
+            } else if (c == ';' || c == '\n') {
+              break;
+            }
+          }
+          if (!more) {
+            break;
+          }
+          while (q < text.size() && text[q] == ' ') {
+            ++q;
+          }
+        }
+        p = q;
+      }
+    }
+    return out;
+  }
+
+  // Close the innermost open instance: outline its captured decl+solve
+  // into a frame struct + solve function, and leave in the parent stream
+  // the roots' quad declarations, the frame variable, and the guarded
+  // call. The guard is the 2^depth fix: an instance's solve is a
+  // deterministic function of (snapshot, memoized measures, and the
+  // scalar inputs passed here); when every scalar input is bitwise-equal
+  // to the previous run's, re-running would write identical values, so
+  // the call is skipped. Bitwise (feq) rather than ==, so -0.0 vs 0.0 and
+  // NaN never smuggle a difference through a skip.
+  void closeInstance(std::vector<SolvedW *> &out, int line) {
+    InstOpen fo = std::move(instOpen.back());
+    instOpen.pop_back();
+    std::string fDecl = decl.str();
+    std::string fSolve = solve.str();
+    decl.str(fo.savedDecl);
+    decl.seekp(0, std::ios::end);
+    solve.str(fo.savedSolve);
+    solve.seekp(0, std::ios::end);
+
+    std::vector<SolvedW *> roots(out.begin() + (long)fo.outBefore, out.end());
+    std::set<std::string> rootQuads;
+    // an instance whose top level instantiates another template splices the
+    // inner roots up as its own; the inner FRAME must ride along to wherever
+    // the quads land, or the draw call cannot reach it from that scope
+    std::set<std::string> splicedFrames;
+    for (SolvedW *r : roots) {
+      // a root spliced through a nested instantiation keeps its INNERMOST
+      // instance identity — its interior lives in that frame, and the draw
+      // outline must read it there
+      if (r->instId < 0) {
+        r->instId = fo.id;
+      } else if (r->instId != fo.id) {
+        splicedFrames.insert(instInfo.at(r->instId).fvar);
+      }
+      const std::string rs = std::to_string(r->idx);
+      rootQuads.insert("x" + rs);
+      rootQuads.insert("y" + rs);
+      rootQuads.insert("w" + rs);
+      rootQuads.insert("h" + rs);
+    }
+
+    InstInfo &info = instInfo[fo.id];
+    info.structName = "F" + std::to_string(fo.id) + "_" + fo.tname;
+    info.fnName = "solve_" + std::to_string(fo.id) + "_" + fo.tname;
+    info.fvar = "f" + std::to_string(fo.id);
+
+    // Partition the captured decl: a root's quad line goes back to the
+    // parent (its epilogues read the quad by name); every other line is a
+    // member of the frame struct, kept verbatim (they are already valid
+    // member declarations with initializers).
+    std::string memberLines;
+    {
+      size_t p = 0;
+      while (p < fDecl.size()) {
+        size_t e = fDecl.find('\n', p);
+        if (e == std::string::npos) {
+          e = fDecl.size();
+        }
+        const std::string ln = fDecl.substr(p, e - p);
+        p = e + 1;
+        bool relocate = false;
+        for (SolvedW *r : roots) {
+          if (ln == "  float x" + std::to_string(r->idx) + " = 0, y" +
+                        std::to_string(r->idx) + " = 0, w" +
+                        std::to_string(r->idx) + " = 0, h" +
+                        std::to_string(r->idx) + " = 0;") {
+            relocate = true;
+            break;
+          }
+        }
+        for (const std::string &sf : splicedFrames) {
+          if (!relocate && ln.size() > sf.size() + 1 &&
+              ln.compare(ln.size() - sf.size() - 1, sf.size() + 1,
+                         sf + ";") == 0) {
+            relocate = true; // "  F<n>_<name> f<n>;" rides up with the quads
+          }
+        }
+        if (relocate) {
+          decl << ln << '\n';
+        } else {
+          memberLines += ln + "\n";
+          std::string cur;
+          for (char c : ln) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9')) {
+              cur += c;
+            } else {
+              if (isGenIdent(cur)) {
+                info.members.insert(cur);
+              }
+              cur.clear();
+            }
+          }
+          if (isGenIdent(cur)) {
+            info.members.insert(cur);
+          }
+        }
+      }
+    }
+
+    // Outer references: generated identifiers the fragment reads that are
+    // neither members, nor root quads, nor declared inside the fragment —
+    // the enclosing chain cursor, ancestor dims, an enclosing pass
+    // counter. They become const parameters with their own names, so the
+    // fragment text needs no rewriting for them (and when the CALLER is
+    // itself a frame, its own rewrite prefixes the argument).
+    const std::set<std::string> localDecls = declaredInside(fSolve);
+    std::vector<std::string> outers;
+    std::set<std::string> seenOuter;
+    rewriteIdents(fSolve, [&](const std::string &t) -> std::string {
+      if (isGenIdent(t) && info.members.find(t) == info.members.end() &&
+          rootQuads.find(t) == rootQuads.end() &&
+          localDecls.find(t) == localDecls.end() &&
+          seenOuter.insert(t).second) {
+        outers.push_back(t);
+      }
+      return t;
+    });
+
+    const std::string body =
+        rewriteIdents(fSolve, [&](const std::string &t) -> std::string {
+          return info.members.find(t) != info.members.end() ? "f." + t : t;
+        });
+
+    frameDefs << "struct " << info.structName << " {\n"
+              << memberLines << "  int ran = 0;\n";
+    for (size_t k = 0; k < outers.size(); ++k) {
+      if (!frameRefType(outers[k], true).empty()) {
+        continue; // a frame is storage, not an input value
+      }
+      frameDefs << "  " << (isIntFamily(outers[k]) ? "int" : "float")
+                << " li" << k << " = 0;\n";
+    }
+    frameDefs << "};\n\n";
+
+    frameDefs << "template <class Snapshot, class Sink>\n"
+              << "UIC_GEN_NOINLINE void " << info.fnName
+              << "(const Snapshot &s, Sink &sink, float W, float H, "
+              << info.structName << " &f";
+    for (SolvedW *r : roots) {
+      const std::string rs = std::to_string(r->idx);
+      frameDefs << ", float &x" << rs << ", float &y" << rs << ", float &w"
+                << rs << ", float &h" << rs;
+    }
+    for (const std::string &o : outers) {
+      const std::string fr = frameRefType(o, true);
+      if (!fr.empty()) {
+        frameDefs << ", " << fr << o;
+      } else {
+        frameDefs << ", const " << (isIntFamily(o) ? "int " : "float ") << o;
+      }
+    }
+    frameDefs << ") {\n  using gen_detail::R;\n"
+              << "  (void)s; (void)sink; (void)W; (void)H; (void)f;\n"
+              << body << "}\n\n";
+
+    // The parent: frame storage, then the input-guarded call between the
+    // provenance markers.
+    decl << "  " << info.structName << " " << info.fvar << ";\n";
+    solveLine("// >>> " + fo.tname + " :" + std::to_string(line));
+    std::string cond = "!" + info.fvar + ".ran";
+    std::string saves = info.fvar + ".ran = 1;";
+    for (size_t k = 0; k < outers.size(); ++k) {
+      if (!frameRefType(outers[k], true).empty()) {
+        continue;
+      }
+      const std::string li = info.fvar + ".li" + std::to_string(k);
+      cond += isIntFamily(outers[k])
+                  ? " || " + li + " != " + outers[k]
+                  : " || !gen_detail::feq(" + li + ", " + outers[k] + ")";
+      saves += " " + li + " = " + outers[k] + ";";
+    }
+    std::string call = info.fnName + "(s, sink, W, H, " + info.fvar;
+    for (SolvedW *r : roots) {
+      const std::string rs = std::to_string(r->idx);
+      call += ", x" + rs + ", y" + rs + ", w" + rs + ", h" + rs;
+    }
+    for (const std::string &o : outers) {
+      call += ", " + o;
+    }
+    call += ");";
+    solveLine("if (" + cond + ") { " + saves + " " + call + " }");
+    solveLine("// <<< " + fo.tname);
+  }
+
+  static bool isIntFamily(const std::string &t) {
+    return t.rfind("pass", 0) == 0 || t.rfind("hasT", 0) == 0;
+  }
+
+  // A relocated frame referenced from outside its declaring scope: passed
+  // by reference — mutable on the solve side (the inner guarded call runs
+  // there), const on the draw side. Returns empty when `t` is no frame.
+  std::string frameRefType(const std::string &t, bool solveSide) const {
+    if (t.size() < 2 || t[0] != 'f') {
+      return std::string();
+    }
+    for (size_t i = 1; i < t.size(); ++i) {
+      if (t[i] < '0' || t[i] > '9') {
+        return std::string();
+      }
+    }
+    const auto it = instInfo.find(std::atoi(t.c_str() + 1));
+    if (it == instInfo.end() || it->second.fvar != t) {
+      return std::string();
+    }
+    return solveSide ? it->second.structName + " &"
+                     : "const " + it->second.structName + " &";
+  }
+
   // ---- the solve schedule ---------------------------------------------------
 
   // Solve one AST node into zero or more widget INSTANCES appended to
@@ -1478,7 +1854,16 @@ struct Emit {
           env[p.name] = "";
         }
       }
-      solveLine("// >>> " + t.name + " :" + std::to_string(n.line));
+      InstOpen fo;
+      fo.tname = t.name;
+      fo.id = instCount++;
+      fo.startVar = nextVar;
+      fo.outBefore = out.size();
+      fo.savedDecl = decl.str();
+      fo.savedSolve = solve.str();
+      decl.str(std::string());
+      solve.str(std::string());
+      instOpen.push_back(std::move(fo));
       envStack.push_back(std::move(env));
       declStack.push_back(&t);
       ++instanceDepth;
@@ -1488,7 +1873,7 @@ struct Emit {
       --instanceDepth;
       declStack.pop_back();
       envStack.pop_back();
-      solveLine("// <<< " + t.name);
+      closeInstance(out, n.line);
       return;
     }
 
@@ -2111,8 +2496,91 @@ struct Emit {
 
   // ---- the draw pass (render order; absolute coordinates) -----------------
 
+  // Outline one instance ROOT's draw (or walk) subtree into its own
+  // function. Per ROOT, not per instance: a multi-root instance's roots
+  // can interleave with siblings under reverse: 1, and per-root functions
+  // keep the parent's emission order exactly. The fragment reads the
+  // frame's solved interior through `f`, the root's quad and any parent
+  // absolutes as const parameters.
+  void outlineDrawRoot(const SolvedW &sw, const std::string &pax,
+                       const std::string &pay, bool hier,
+                       const std::string &srcPath) {
+    const int prev = currentDrawInst;
+    currentDrawInst = sw.instId;
+    const std::string saved = drawOut->str();
+    drawOut->str(std::string());
+    const int savedIndent = drawIndent;
+    drawIndent = 1;
+    if (hier) {
+      drawNodeHier(sw, pax, pay, srcPath);
+    } else {
+      drawNode(sw, pax, pay);
+    }
+    drawIndent = savedIndent;
+    std::string frag = drawOut->str();
+    drawOut->str(saved);
+    drawOut->seekp(0, std::ios::end);
+    currentDrawInst = prev;
+
+    const InstInfo &info = instInfo.at(sw.instId);
+    const std::string rs = std::to_string(sw.idx);
+    const std::set<std::string> rootQuad = {"x" + rs, "y" + rs, "w" + rs,
+                                            "h" + rs};
+    const std::set<std::string> localDecls = declaredInside(frag);
+    std::vector<std::string> outers;
+    std::set<std::string> seenOuter;
+    rewriteIdents(frag, [&](const std::string &t) -> std::string {
+      if (isGenIdent(t) && info.members.find(t) == info.members.end() &&
+          rootQuad.find(t) == rootQuad.end() &&
+          localDecls.find(t) == localDecls.end() &&
+          seenOuter.insert(t).second) {
+        outers.push_back(t);
+      }
+      return t;
+    });
+    const std::string body =
+        rewriteIdents(frag, [&](const std::string &t) -> std::string {
+          return info.members.find(t) != info.members.end() ? "f." + t : t;
+        });
+
+    const std::string fn = (hier ? "walk_" : "draw_") +
+                           std::to_string(sw.instId) + "_" + rs;
+    std::ostringstream &defs = hier ? walkFnDefs : drawFnDefs;
+    defs << "template <class Snapshot, class Sink>\n"
+         << "UIC_GEN_NOINLINE void " << fn
+         << "(const Snapshot &s, Sink &sink, float W, float H, const "
+         << info.structName << " &f, const float x" << rs
+         << ", const float y" << rs << ", const float w" << rs
+         << ", const float h" << rs;
+    for (const std::string &o : outers) {
+      const std::string fr = frameRefType(o, false);
+      if (!fr.empty()) {
+        defs << ", " << fr << o;
+      } else {
+        defs << ", const " << (isIntFamily(o) ? "int " : "float ") << o;
+      }
+    }
+    defs << ") {\n  using gen_detail::R;\n"
+         << "  (void)s; (void)sink; (void)W; (void)H; (void)f;\n"
+         << "  (void)x" << rs << "; (void)y" << rs << "; (void)w" << rs
+         << "; (void)h" << rs << ";\n"
+         << body << "}\n\n";
+
+    std::string call = fn + "(s, sink, W, H, " + info.fvar + ", x" + rs +
+                       ", y" + rs + ", w" + rs + ", h" + rs;
+    for (const std::string &o : outers) {
+      call += ", " + o;
+    }
+    call += ");";
+    drawLine(call);
+  }
+
   void drawNode(const SolvedW &sw, const std::string &pax,
                 const std::string &pay) {
+    if (sw.instId >= 0 && sw.instId != currentDrawInst) {
+      outlineDrawRoot(sw, pax, pay, /*hier=*/false, std::string());
+      return;
+    }
     const Node &n = *sw.node;
     const std::string sfx = std::to_string(sw.idx);
     const std::string ax = "ax" + sfx, ay = "ay" + sfx;
@@ -2167,6 +2635,10 @@ struct Emit {
   // src_path (a template root) refreshes it for its subtree.
   void drawNodeHier(const SolvedW &sw, const std::string &pax,
                     const std::string &pay, const std::string &srcPath) {
+    if (sw.instId >= 0 && sw.instId != currentDrawInst) {
+      outlineDrawRoot(sw, pax, pay, /*hier=*/true, srcPath);
+      return;
+    }
     const Node &n = *sw.node;
     const std::string sfx = std::to_string(sw.idx);
     const std::string ax = "ax" + sfx, ay = "ay" + sfx;
@@ -2660,6 +3132,7 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "#include <array>\n"
      << "#include <cmath>\n"
      << "#include <cstddef>\n"
+     << "#include <bit>\n"
      << "#include <cstdint>\n"
      << "#include <cstdio>\n"
      << "#include <iterator>\n"
@@ -2668,12 +3141,28 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "#include <utility>\n\n"
      << "#include <fmt/compile.h>\n"
      << "#include <fmt/format.h>\n\n"
+     << "// Outlined instance functions must STAY outlined: a single-call\n"
+     << "// static is exactly what an inliner reconstitutes into one giant\n"
+     << "// function, and the whole point of the outline is that every\n"
+     << "// optimizer pass sees small bodies.\n"
+     << "#if defined(_MSC_VER)\n"
+     << "#define UIC_GEN_NOINLINE __declspec(noinline)\n"
+     << "#else\n"
+     << "#define UIC_GEN_NOINLINE [[gnu::noinline]]\n"
+     << "#endif\n\n"
      << "namespace " << opt.ns << " {\n"
      << "namespace gen_detail {\n"
      << "// Round: floor(f + 0.5), applied per widget\n"
      << "inline float R(float f) { return std::floor(f + 0.5f); }\n"
      << "inline float fracf(float a, float b) { return b > 0 ? a / b : 0; "
         "}\n"
+     << "// bitwise float equality for the instance input guards: -0.0 and\n"
+     << "// 0.0 must not compare equal (their downstream arithmetic can\n"
+     << "// differ bytewise), and a NaN input must always re-run\n"
+     << "inline bool feq(float a, float b) {\n"
+     << "  return std::bit_cast<std::uint32_t>(a) == "
+        "std::bit_cast<std::uint32_t>(b);\n"
+     << "}\n"
      << "// max(a, b): same-typed, so an integer clamp stays integral and\n"
      << "// `/` on the result means floor (truncation and floor agree once\n"
      << "// the value cannot be negative)\n"
@@ -2812,12 +3301,13 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
          "FIRST\n"
       << "// (it provides gen_detail, the manifests, and the schema).\n"
       << "namespace " << opt.ns << " {\n"
+      << e.walkFnDefs.str()
       << emitFn(fn + "_hier", e.walk.str(),
                 "  // ---- walk (hierarchy + per-node draws) ----\n")
       << nsClose;
     *hierOut = h.str();
   }
-  return prefix +
+  return prefix + e.frameDefs.str() + e.drawFnDefs.str() +
          emitFn(fn, e.draw.str(),
                 "  // ---- draw (render order, absolute) ----\n") +
          nsClose;

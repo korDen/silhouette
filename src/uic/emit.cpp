@@ -334,6 +334,10 @@ struct Emit {
   std::ostringstream frameDefs;  // frame structs + solve_ functions
   std::ostringstream drawFnDefs; // draw_ functions (render header)
   std::ostringstream walkFnDefs; // walk_ functions (hier header)
+  // accumulated body text by phase, for the projection scan: which
+  // snapshot paths the module reads, and whether a read can affect
+  // layout (it appears in ANY solve text) or only draw arguments
+  std::string solveScan, drawScan;
   int instCount = 0;
   struct InstOpen {
     std::string tname;
@@ -1635,6 +1639,7 @@ struct Emit {
     call += ");";
     solveLine("if (" + cond + ") { " + saves + " " + call + " }");
     solveLine("// <<< " + fo.tname);
+    solveScan += body;
   }
 
   static bool isIntFamily(const std::string &t) {
@@ -1659,6 +1664,70 @@ struct Emit {
     }
     return solveSide ? it->second.structName + " &"
                      : "const " + it->second.structName + " &";
+  }
+
+  // Every snapshot path a body text reads: occurrences of `s.` (the
+  // snapshot parameter, standalone token) followed by a member chain,
+  // including compile-time-folded index segments. The matched text is
+  // exactly the compilable access expression minus the `s.` prefix.
+  static std::set<std::string> scanSnapshotPaths(const std::string &text) {
+    std::set<std::string> out;
+    const size_t n = text.size();
+    auto identChar = [](char c) {
+      return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+             (c >= '0' && c <= '9') || c == '_';
+    };
+    for (size_t i = 0; i + 2 < n; ++i) {
+      if (text[i] != 's' || text[i + 1] != '.') {
+        continue;
+      }
+      if (i > 0 && (identChar(text[i - 1]) || text[i - 1] == '.')) {
+        continue; // sink.measure's k, f.x12's x — not the snapshot
+      }
+      size_t p = i + 2;
+      std::string path;
+      while (p < n) {
+        if (identChar(text[p])) {
+          path += text[p++];
+        } else if (text[p] == '[') {
+          int depth = 0;
+          do {
+            if (text[p] == '[') {
+              ++depth;
+            } else if (text[p] == ']') {
+              --depth;
+            }
+            path += text[p++];
+          } while (p < n && depth > 0);
+        } else if (text[p] == '.' && p + 1 < n && identChar(text[p + 1]) &&
+                   !(text[p + 1] >= '0' && text[p + 1] <= '9')) {
+          path += text[p++];
+        } else {
+          break;
+        }
+      }
+      if (!path.empty()) {
+        out.insert(path);
+      }
+      i = p;
+    }
+    return out;
+  }
+
+  static std::string sanitizePath(const std::string &path) {
+    std::string out;
+    for (char c : path) {
+      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9')) {
+        out += c;
+      } else if (!out.empty() && out.back() != '_') {
+        out += '_';
+      }
+    }
+    while (!out.empty() && out.back() == '_') {
+      out.pop_back();
+    }
+    return out;
   }
 
   // ---- the solve schedule ---------------------------------------------------
@@ -2573,6 +2642,9 @@ struct Emit {
     }
     call += ");";
     drawLine(call);
+    if (!hier) {
+      drawScan += body;
+    }
   }
 
   void drawNode(const SolvedW &sw, const std::string &pax,
@@ -3109,7 +3181,8 @@ struct Emit {
 } // namespace
 
 std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
-                            std::vector<Diag> &diags, std::string *hierOut) {
+                            std::vector<Diag> &diags, std::string *hierOut,
+                            std::string *depsOut) {
   Emit e(m, opt, diags);
   e.run();
 
@@ -3132,6 +3205,7 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
      << "#include <array>\n"
      << "#include <cmath>\n"
      << "#include <cstddef>\n"
+     << "#include <cstring>\n"
      << "#include <bit>\n"
      << "#include <cstdint>\n"
      << "#include <cstdio>\n"
@@ -3266,6 +3340,95 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
     os << "  {" << idbuf << ", \"" << name << "\"},\n";
   }
   os << "};\n\n";
+
+  // ---- the projection: every snapshot path this module reads ------------
+  // A typed capture of exactly the fields the panel depends on, with a
+  // bitwise dirty probe and a memo entry: rendering with an unchanged
+  // projection (and unchanged screen size) is proven output-identical, so
+  // the memo returns false without a single sink call and the consumer can
+  // reuse whatever it retained. The deps descriptor (path, offset, size)
+  // exists so a harness can mutate ANY field and hold the probe honest.
+  const std::string solveAll = e.solveScan + e.solve.str();
+  const std::string drawAll = e.drawScan + e.draw.str();
+  const std::set<std::string> layoutRaw = Emit::scanSnapshotPaths(solveAll);
+  std::set<std::string> allRaw = Emit::scanSnapshotPaths(drawAll);
+  allRaw.insert(layoutRaw.begin(), layoutRaw.end());
+  // one FIELD can be spelled two ways (a folded index appears as [(0)] in
+  // one body and [0] in another) — canonicalize by the sanitized member
+  // name, keeping the first spelling and merging the classification
+  std::map<std::string, std::string> canon; // member -> one spelling
+  std::set<std::string> layoutMembers;
+  for (const std::string &p : allRaw) {
+    canon.emplace(Emit::sanitizePath(p), p);
+  }
+  for (const std::string &p : layoutRaw) {
+    layoutMembers.insert(Emit::sanitizePath(p));
+  }
+  std::vector<std::pair<std::string, std::string>> allPaths(canon.begin(),
+                                                            canon.end());
+  {
+    os << "// the projection of the snapshot this module reads ("
+       << allPaths.size() << " paths)\n"
+       << "template <class Snapshot> struct " << fn << "_proj {\n";
+    for (const auto &mp : allPaths) {
+      os << "  std::remove_cvref_t<decltype(std::declval<const Snapshot "
+            "&>()."
+         << mp.second << ")> " << mp.first << "{};\n";
+    }
+    os << "  float w_ = 0, h_ = 0;\n  int primed_ = 0;\n};\n\n";
+
+    os << "template <class Snapshot>\n"
+       << "inline bool " << fn
+       << "_dirty(const Snapshot &s, float screenW, float screenH, const "
+       << fn << "_proj<Snapshot> &p) {\n"
+       << "  if (p.primed_ == 0) { return true; }\n"
+       << "  if (!gen_detail::feq(p.w_, screenW) || !gen_detail::feq(p.h_, "
+          "screenH)) { return true; }\n";
+    for (const auto &mp : allPaths) {
+      os << "  { const auto v = s." << mp.second << "; if (std::memcmp(&p."
+         << mp.first << ", &v, sizeof v) != 0) { return true; } }\n";
+    }
+    os << "  return false;\n}\n\n";
+
+    os << "template <class Snapshot>\n"
+       << "inline void " << fn
+       << "_capture(const Snapshot &s, float screenW, float screenH, " << fn
+       << "_proj<Snapshot> &p) {\n";
+    for (const auto &mp : allPaths) {
+      os << "  p." << mp.first << " = s." << mp.second << ";\n";
+    }
+    os << "  p.w_ = screenW;\n  p.h_ = screenH;\n  p.primed_ = 1;\n}\n\n";
+
+    os << "// (path, offset, size) per projected field — the mutation\n"
+       << "// harness's handle on the probe. Offsets come from pointer\n"
+       << "// arithmetic over a real object (offsetof cannot reach through\n"
+       << "// a std::array's operator[]).\n"
+       << "struct " << fn << "_dep { const char *path; std::size_t offset; "
+          "std::size_t size; };\n"
+       << "template <class Snapshot>\n"
+       << "inline std::array<" << fn << "_dep, " << allPaths.size() << "> "
+       << fn << "_deps() {\n"
+       << "  static const Snapshot probe{};\n"
+       << "  const char *base = reinterpret_cast<const char *>(&probe);\n"
+       << "  return {{\n";
+    for (const auto &mp : allPaths) {
+      os << "    {\"" << mp.second
+         << "\", static_cast<std::size_t>(reinterpret_cast<const char "
+            "*>(&probe."
+         << mp.second << ") - base), sizeof(probe." << mp.second << ")},\n";
+    }
+    os << "  }};\n}\n\n";
+  }
+  if (depsOut != nullptr) {
+    std::ostringstream rep;
+    for (const auto &mp : allPaths) {
+      rep << mp.second << '\t'
+          << (layoutMembers.count(mp.first) != 0 ? "layout" : "draw-only")
+          << '\n';
+    }
+    *depsOut = rep.str();
+  }
+
   // The preamble + both manifests are shared; the panel function and the
   // parity-walk twin differ only in their body (draw vs walk). Emit each
   // from the same decl+solve so the geometry is identical; the walk adds a
@@ -3307,10 +3470,25 @@ std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
       << nsClose;
     *hierOut = h.str();
   }
+  std::ostringstream memoFn;
+  memoFn << "// The memo entry: render only when the projection (or the\n"
+         << "// screen size) changed since the last capture. Returns false\n"
+         << "// WITHOUT a single sink call when clean — the caller reuses\n"
+         << "// whatever it retained from the last true return.\n"
+         << "template <class Snapshot, class Sink>\n"
+         << "inline bool " << fn
+         << "_memo(const Snapshot &s, float screenW, float screenH, Sink "
+            "&sink, "
+         << fn << "_proj<Snapshot> &p) {\n"
+         << "  if (!" << fn << "_dirty(s, screenW, screenH, p)) { return "
+            "false; }\n"
+         << "  " << fn << "_capture(s, screenW, screenH, p);\n"
+         << "  " << fn << "(s, screenW, screenH, sink);\n"
+         << "  return true;\n}\n\n";
   return prefix + e.frameDefs.str() + e.drawFnDefs.str() +
          emitFn(fn, e.draw.str(),
                 "  // ---- draw (render order, absolute) ----\n") +
-         nsClose;
+         memoFn.str() + nsClose;
 }
 
 } // namespace uic

@@ -831,6 +831,36 @@ TEST(UicEmit, ATemplateInstanceOutlinesIntoAGuardedFunction) {
             std::string::npos);
 }
 
+TEST(UicEmit, TheProjectionCapturesEveryReadPath) {
+  // the module emits its projection: a typed capture of exactly the
+  // snapshot paths it reads, a bitwise dirty probe, a capture, a memo
+  // entry that renders only when dirty, and the (path, offset, size)
+  // descriptor a mutation harness holds the probe honest with
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 4h;\n"
+      "    image { texture: /art/x.tga; bind visible: snapshot.unit.hp > 0;"
+      " width: 2h; height: 2h; }\n"
+      "    label { bind content: num(snapshot.player.score); font: dyn_9; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_NE(h.find("struct panel_proj {"), std::string::npos);
+  EXPECT_NE(h.find("&>().unit.hp)> unit_hp{};"), std::string::npos);
+  EXPECT_NE(h.find("&>().player.score)> player_score{};"),
+            std::string::npos);
+  EXPECT_NE(h.find("inline bool panel_dirty("), std::string::npos);
+  EXPECT_NE(h.find("std::memcmp(&p.unit_hp, &v, sizeof v)"),
+            std::string::npos);
+  EXPECT_NE(h.find("inline void panel_capture("), std::string::npos);
+  EXPECT_NE(h.find("inline bool panel_memo("), std::string::npos);
+  EXPECT_NE(h.find("if (!panel_dirty(s, screenW, screenH, p)) { return "
+                   "false; }"),
+            std::string::npos);
+  EXPECT_NE(h.find("{\"unit.hp\", static_cast<std::size_t>("),
+            std::string::npos);
+}
+
 TEST(UicEmit, FityMemoizesTheLineHeightPerFrame) {
   // fity sizes to the font cell; the line_height result cannot change
   // within a frame, so it is memoized per site exactly like the fitx

@@ -80,8 +80,12 @@ struct EmitOptions {
 // function: the same geometry, but each node opens a src_path:src_line marker
 // (with the node's absolute rect) before its draws, for the structural
 // parity diff.
+// `depsOut`, when non-null, receives the dependency report: one line per
+// snapshot path the module reads, tab-separated from its class — `layout`
+// (can move solved geometry) or `draw-only` (feeds draw arguments alone).
 std::string emitPanelHeader(const Module &m, const EmitOptions &opt,
                             std::vector<Diag> &diags,
-                            std::string *hierOut = nullptr);
+                            std::string *hierOut = nullptr,
+                            std::string *depsOut = nullptr);
 
 } // namespace uic

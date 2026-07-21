@@ -16,6 +16,7 @@ int main(int argc, char **argv) {
   std::string schemaOut;
   std::string emitOut;
   std::string hierOut;
+  std::string depsOut;
   std::string assetRoot;
   std::string missingAssetsFile;
   std::string schemaInclude = "schema.h"; // caller passes the real path
@@ -39,6 +40,8 @@ int main(int argc, char **argv) {
       emitOut = next();
     } else if (std::strcmp(argv[i], "--emit-hier") == 0) {
       hierOut = next();
+    } else if (std::strcmp(argv[i], "--deps-log") == 0) {
+      depsOut = next();
     } else if (std::strcmp(argv[i], "--assets") == 0) {
       assetRoot = next();
       // one asset path per line; '#' starts a comment. A missing file is a
@@ -187,8 +190,10 @@ int main(int argc, char **argv) {
       }
       std::vector<uic::Diag> emitDiags;
       std::string hierStr;
+      std::string depsStr;
       const std::string header = uic::emitPanelHeader(
-          m, opt, emitDiags, hierOut.empty() ? nullptr : &hierStr);
+          m, opt, emitDiags, hierOut.empty() ? nullptr : &hierStr,
+          depsOut.empty() ? nullptr : &depsStr);
       int skips = 0;
       for (const uic::Diag &d : emitDiags) {
         if (d.severity == uic::Diag::Severity::kWarning) {
@@ -224,6 +229,16 @@ int main(int argc, char **argv) {
         }
         hf << hierStr;
         std::printf("hier -> %s\n", hierOut.c_str());
+      }
+      if (!depsOut.empty()) {
+        std::ofstream df(depsOut, std::ios::binary);
+        if (!df) {
+          std::fprintf(stderr, "%s: cannot write\n", depsOut.c_str());
+          ++failures;
+          continue;
+        }
+        df << depsStr;
+        std::printf("deps -> %s\n", depsOut.c_str());
       }
     }
   }

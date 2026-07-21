@@ -1566,7 +1566,10 @@ TEST(UicEmit, ASettledConditionPicksItsArmAndTheOtherNeverExists) {
       "t { kind: 0; slot: 5; }\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
-  EXPECT_NE(h.find("s.unit.abilities[(5)].boosted"), std::string::npos) << h;
+  // instance outlining splits the winner across the seam: the element is
+  // passed by reference at the call site, the field is read off the param
+  EXPECT_NE(h.find("s.unit.abilities[(5)]"), std::string::npos) << h;
+  EXPECT_NE(h.find(".boosted"), std::string::npos) << h;
   // the losing arm is GONE — not merely unreachable. `stash` has no other
   // reason to appear, so its absence IS the fold. (A blanket search for "?"
   // would catch the runtime helpers in the preamble, which are not this.)
@@ -1591,7 +1594,8 @@ TEST(UicEmit, ASettledMatchScrutineePicksItsArmToo) {
       "t { kind: 0; slot: 5; }\n",
       &diags);
   ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
-  EXPECT_NE(h.find("s.unit.backpack[(5)].icon"), std::string::npos) << h;
+  EXPECT_NE(h.find("s.unit.backpack[(5)]"), std::string::npos) << h;
+  EXPECT_NE(h.find(".icon"), std::string::npos) << h;
   EXPECT_EQ(h.find("consumables"), std::string::npos) << h;
   EXPECT_EQ(h.find("stash"), std::string::npos) << h;
 }

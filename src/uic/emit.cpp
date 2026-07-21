@@ -286,6 +286,11 @@ struct SolvedW {
   // stickytoinvis (unlike a bound visible).
   std::string guard;
   std::vector<SolvedW *> kids;
+  // The PARENT's solved dim variables. A frame's border thickness is a dim
+  // resolved against the PARENT, not against the frame itself, so the draw
+  // pass needs them long after the solve has moved on. Empty at the root,
+  // where the widget's own dims stand in.
+  std::string parentW, parentH;
   bool reverse = false;
   // a widgetstate layer: excluded from unions and float chains
   bool isState = false;
@@ -1358,6 +1363,8 @@ struct Emit {
     sw.attrs = bagOf(n);
     sw.idx = nextVar++;
     sw.isState = isState;
+    sw.parentW = pw;
+    sw.parentH = ph;
     sw.reverse = flag(sw.attrs, "reverse", false);
     // transpile binds NOW — the instantiation's param environment is
     // gone by draw time
@@ -2157,48 +2164,31 @@ struct Emit {
     }
     if (n.tag == "frame") {
       const std::string *tex = get(bag, "texture");
-      if (tex == nullptr) {
-        // a textureless frame is a plain border: bordercolor drawn as
-        // four edge quads of borderthickness
-        if (get(bag, "bordercolor") == nullptr) {
-          skip(n.line, "textureless frame with no border");
-          return;
-        }
-        const std::string *bt = get(bag, "borderthickness");
-        const std::string bthE =
-            "R(" +
-            dimExpr(bt != nullptr ? parseDim(*bt) : parseDim("1"), false, w,
-                    h, false) +
-            ")";
-        float bc[4] = {0, 0, 0, 1};
-        if (const std::string *v = get(bag, "bordercolor")) {
-          parseColor(*v, bc);
-        }
-        const std::string bcol = "ui::Color{" + ftos(bc[0]) + ", " +
-                                 ftos(bc[1]) + ", " + ftos(bc[2]) + ", " +
-                                 ftos(bc[3]) + "}";
-        const std::string bth = "bth" + std::to_string(sw.idx);
-        drawLine("const float " + bth + " = " + bthE + ";");
-        drawLine("sink.quad({" + ax + ", " + ay + ", " + w + ", " + bth +
-                 "}, " + bcol + ", 0, ui::kNoClip);"); // top
-        drawLine("sink.quad({" + ax + ", " + ay + " + " + h + " - " + bth +
-                 ", " + w + ", " + bth + "}, " + bcol +
-                 ", 0, ui::kNoClip);"); // bottom
-        drawLine("sink.quad({" + ax + ", " + ay + ", " + bth + ", " + h +
-                 "}, " + bcol + ", 0, ui::kNoClip);"); // left
-        drawLine("sink.quad({" + ax + " + " + w + " - " + bth + ", " + ay +
-                 ", " + bth + ", " + h + "}, " + bcol +
-                 ", 0, ui::kNoClip);"); // right
+      // A frame is ALWAYS nine pieces. With no texture every piece samples
+      // the solid white texel, so the ring comes out as plain quads — the
+      // classic hairline border. Drawing that instead as four full-length
+      // edge quads paints the very same pixels but emits a DIFFERENT command
+      // stream (each corner fused into an edge rather than standing alone),
+      // so both cases share this one decomposition.
+      const bool textured = tex != nullptr;
+      if (!textured && get(bag, "bordercolor") == nullptr) {
+        skip(n.line, "textureless frame with no border");
         return;
       }
       const std::string *bt = get(bag, "borderthickness");
+      // The thickness is a dim like any other and resolves against the
+      // PARENT — `%` the parent's width, `@` its height — never against the
+      // frame itself. Default: all centre when textured, a 1px ring when not.
+      const std::string &refW = sw.parentW.empty() ? w : sw.parentW;
+      const std::string &refH = sw.parentH.empty() ? h : sw.parentH;
       const std::string btE =
           "R(" +
-          dimExpr(bt != nullptr ? parseDim(*bt) : parseDim("0"), false,
-                  w, h, false) +
+          dimExpr(bt != nullptr ? parseDim(*bt)
+                                : parseDim(textured ? "0" : "1"),
+                  true, refW, refH, false) +
           ")";
       const std::string col = colorLiteral(sw, 1);
-      const size_t dot = tex->rfind('.');
+      const size_t dot = textured ? tex->rfind('.') : std::string::npos;
       // 9-slice pieces in a fixed emit order -- center, then the bottom row,
       // the sides, the top row. The nine pieces do not overlap, so the order
       // is a convention (shared by every backend), not a visual choice.
@@ -2222,31 +2212,49 @@ struct Emit {
       const std::string fflags = renderFlags(bag, &sw);
       drawLine("{");
       ++drawIndent;
-      drawLine("const float bt = std::min(" + btE + ", std::min(" + w +
-               ", " + h + ") / 2);");
-      drawLine("const float cwm = " + w + " - 2 * bt, chm = " + h +
-               " - 2 * bt;");
+      // the thickness clamps PER AXIS to half that axis, so a rect thinner
+      // than two borders keeps square corners on its long axis
+      drawLine("const float btv = " + btE + ";");
+      drawLine("const float btx = " + w + " < 2 * btv ? " + w +
+               " / 2 : btv;");
+      drawLine("const float bty = " + h + " < 2 * btv ? " + h +
+               " / 2 : btv;");
+      drawLine("const float cwm = " + w + " - 2 * btx, chm = " + h +
+               " - 2 * bty;");
       // hoisted so a bound colour is read once and each piece's skip below
       // can test the alpha that actually applies to it
       drawLine("const ui::Color fc = " + col + ";");
       drawLine("const ui::Color fbc = " + bcol + ";");
       for (const auto &p : kPieces) {
-        const std::string piece =
-            tex->substr(0, dot) + p.suffix + tex->substr(dot);
         const std::string x =
-            p.gx == 0 ? ax : (p.gx == 1 ? ax + " + bt" : ax + " + bt + cwm");
+            p.gx == 0 ? ax : (p.gx == 1 ? ax + " + btx" : ax + " + btx + cwm");
         const std::string y =
-            p.gy == 0 ? ay : (p.gy == 1 ? ay + " + bt" : ay + " + bt + chm");
-        const std::string pw = p.gx == 1 ? "cwm" : "bt";
-        const std::string ph = p.gy == 1 ? "chm" : "bt";
+            p.gy == 0 ? ay : (p.gy == 1 ? ay + " + bty" : ay + " + bty + chm");
+        const std::string pieceW = p.gx == 1 ? "cwm" : "btx";
+        const std::string pieceH = p.gy == 1 ? "chm" : "bty";
         // the centre piece wears `color`, the ring wears `bordercolor`
         const std::string pc =
             (p.gx == 1 && p.gy == 1) ? std::string("fc") : std::string("fbc");
+        const std::string rect =
+            "{" + x + ", " + y + ", " + pieceW + ", " + pieceH + "}";
+        // An untextured piece is a solid fill: a plain quad, unless render
+        // flags are in play — those only ride on an image, so it becomes a
+        // textureless image instead.
+        std::string call;
+        if (textured) {
+          const std::string piece =
+              tex->substr(0, dot) + p.suffix + tex->substr(dot);
+          call = "sink.image(" + rect + ", " + texIdExpr(piece, n.line) +
+                 ", {0, 0, 1, 1}, " + pc + ", " + fflags + ", 0, ui::kNoClip);";
+        } else if (fflags == "0") {
+          call = "sink.quad(" + rect + ", " + pc + ", 0, ui::kNoClip);";
+        } else {
+          call = "sink.image(" + rect + ", 0, {0, 0, 1, 1}, " + pc + ", " +
+                 fflags + ", 0, ui::kNoClip);";
+        }
         // a piece with no area or a fully transparent colour issues no draw
-        drawLine("if (" + pw + " > 0 && " + ph + " > 0 && " + pc + ".a > 0) " +
-                 "sink.image({" + x + ", " + y + ", " + pw + ", " + ph +
-                 "}, " + texIdExpr(piece, n.line) + ", {0, 0, 1, 1}, " + pc +
-                 ", " + fflags + ", 0, ui::kNoClip);");
+        drawLine("if (" + pieceW + " > 0 && " + pieceH + " > 0 && " + pc +
+                 ".a > 0) " + call);
       }
       --drawIndent;
       drawLine("}");

@@ -175,17 +175,27 @@ TEST(UicEmit, AlignAndDeltaSizes) {
 }
 
 TEST(UicEmit, NineSliceExpandsWithParentRelativeBorder) {
+  // The border thickness is a dim like any other: `%` resolves against the
+  // PARENT's width, never against the frame's own box. The frame here is
+  // half its parent, so the two readings are distinguishable.
   std::vector<uic::Diag> diags;
   const std::string h = emit(
-      "panel { width: 40h; height: 3h;\n"
-      "    frame { texture: /art/bar.img; borderthickness: 0.2h; } }\n",
+      "panel { width: 40h; height: 20h;\n"
+      "    frame { texture: /art/bar.img; width: 50%; height: 50%;\n"
+      "            borderthickness: 25%; } }\n",
       &diags);
-  ASSERT_TRUE(diags.empty());
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
   for (const char *piece : {"/art/bar_tl.img", "/art/bar_c.img",
                             "/art/bar_br.img"}) {
     EXPECT_NE(h.find(piece), std::string::npos) << piece;
   }
-  EXPECT_NE(h.find("std::min("), std::string::npos); // border clamp
+  // the parent's width (w0), not the frame's own w1/h1
+  EXPECT_NE(h.find("R(0.25f * w0)"), std::string::npos) << h;
+  EXPECT_EQ(h.find("0.25f * h1"), std::string::npos) << h;
+  EXPECT_EQ(h.find("0.25f * w1"), std::string::npos) << h;
+  // and the clamp is PER AXIS, so a thin rect keeps square corners crosswise
+  EXPECT_NE(h.find("btx = w1 < 2 * btv"), std::string::npos) << h;
+  EXPECT_NE(h.find("bty = h1 < 2 * btv"), std::string::npos) << h;
 }
 
 TEST(UicEmit, SnapshotBindsTranspile) {
@@ -719,7 +729,7 @@ TEST(UicEmit, AFramesRingWearsItsBorderColour) {
             std::string::npos);
   // the centre guards on fc, the ring on fbc — so this frame draws 8 of 9
   EXPECT_NE(h.find("cwm > 0 && chm > 0 && fc.a > 0"), std::string::npos);
-  EXPECT_NE(h.find("bt > 0 && bt > 0 && fbc.a > 0"), std::string::npos);
+  EXPECT_NE(h.find("btx > 0 && bty > 0 && fbc.a > 0"), std::string::npos);
 }
 
 TEST(UicEmit, AFrameWithNoBorderColourPaintsAllNineTheSame) {
@@ -1134,23 +1144,37 @@ TEST(UicEmit, AnInterpolationHoleInAnAssetIsAHardError) {
             std::string::npos);
 }
 
-TEST(UicEmit, ATexturelessFrameDrawsItsBorder) {
-  // a frame with no texture but a bordercolor is a plain outline: four
-  // edge quads of borderthickness
+TEST(UicEmit, ATexturelessFrameDrawsItsBorderAsNinePieces) {
+  // A textureless frame is not a special case: every piece samples the solid
+  // texel, so it takes the SAME nine-piece decomposition as a textured one,
+  // emitted as plain quads. Four full-length edges would paint identical
+  // pixels but a different command stream — corners fused into edges.
   std::vector<uic::Diag> diags;
   const std::string h = emit(
       "panel { width: 20h; height: 20h;\n"
       "    frame { color: invisible; borderthickness: 1;\n"
       "            bordercolor: rgb(0, 0, 0); } }\n",
       &diags);
-  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
   EXPECT_EQ(h.find("SKIP"), std::string::npos); // not skipped
-  // top edge, then bottom/left/right — all in the border colour
-  EXPECT_NE(h.find("sink.quad({ax1, ay1, w1, bth1}, "
-                   "ui::Color{0.0f, 0.0f, 0.0f, 1.0f}"),
-            std::string::npos);
-  EXPECT_NE(h.find("ay1 + h1 - bth1"), std::string::npos); // bottom
-  EXPECT_NE(h.find("ax1 + w1 - bth1"), std::string::npos); // right
+  EXPECT_NE(h.find("const ui::Color fbc = ui::Color{0.0f, 0.0f, 0.0f, 1.0f}"),
+            std::string::npos)
+      << h;
+  // each corner stands alone, and the edges are shortened by them
+  EXPECT_NE(h.find("sink.quad({ax1, ay1, btx, bty}, fbc"), std::string::npos)
+      << h; // top-left corner
+  EXPECT_NE(h.find("sink.quad({ax1 + btx, ay1, cwm, bty}, fbc"),
+            std::string::npos)
+      << h; // top edge, corner-to-corner
+  EXPECT_NE(h.find("sink.quad({ax1, ay1 + bty, btx, chm}, fbc"),
+            std::string::npos)
+      << h; // left edge
+  // the centre wears `color` — invisible here, so its alpha guard drops it
+  EXPECT_NE(h.find("sink.quad({ax1 + btx, ay1 + bty, cwm, chm}, fc"),
+            std::string::npos)
+      << h;
+  // the old four-edge shortcut is gone
+  EXPECT_EQ(h.find("bth1"), std::string::npos) << h;
 }
 
 TEST(UicEmit, AlphaMasksCutTheirWidgetToShape) {

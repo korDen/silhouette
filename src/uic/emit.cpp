@@ -2131,7 +2131,20 @@ struct Emit {
     }
     float c[4] = {def, def, def, 1};
     if (const std::string *col = get(sw.attrs, key)) {
-      if (!parseColor(*col, c)) {
+      // A colour that does not parse leaves the widget's DEFAULT standing —
+      // parseColor writes white into its out-param before it inspects the
+      // string at all, so trusting that buffer on failure silently repaints
+      // every such widget white. The commonest way to get here is an
+      // attribute that is PRESENT BUT EMPTY (a colour-typed param no call
+      // site supplies), which is exactly the case where the default is the
+      // answer.
+      float parsed[4] = {0, 0, 0, 0};
+      if (parseColor(*col, parsed)) {
+        c[0] = parsed[0];
+        c[1] = parsed[1];
+        c[2] = parsed[2];
+        c[3] = parsed[3];
+      } else if (!col->empty()) {
         diags.push_back({m.name, sw.node->line, 0,
                          "unparsable color '" + *col + "'",
                          Diag::Severity::kWarning});

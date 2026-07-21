@@ -1397,6 +1397,27 @@ TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
       << viaLiteral;
 }
 
+TEST(UicEmit, AnEmptyColourLeavesTheWidgetDefaultStanding) {
+  // A colour-typed param no call site supplies folds to EMPTY, which does not
+  // parse — and an unparsable colour must leave the widget's own default, not
+  // repaint it white. (parseColor fills its out-param with white before it so
+  // much as looks at the string, so trusting that buffer on failure turned
+  // every such widget white.) A label's default is the mid grey.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit("template t {\n"
+                             "    in tint: color;\n"
+                             "    panel { width: 20h; height: 8h;\n"
+                             "        label { color: tint; content: \"5\";\n"
+                             "                width: 5h; height: 2h; } } }\n"
+                             "t { }\n",
+                             &diags);
+  ASSERT_FALSE(uic::hasErrors(diags));
+  EXPECT_NE(h.find("ui::Color{0.5f, 0.5f, 0.5f, 1.0f}"), std::string::npos)
+      << h;
+  EXPECT_EQ(h.find("ui::Color{1.0f, 1.0f, 1.0f, 1.0f}"), std::string::npos)
+      << h;
+}
+
 TEST(UicEmit, APieGraphSweepsItsArc) {
   // A centre fan: the wedge from `start` toward `end` covering `value` of the
   // arc — a radial dial. Authoring angles run from +x with y DOWN; the sink's

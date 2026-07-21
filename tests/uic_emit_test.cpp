@@ -1336,4 +1336,51 @@ TEST(UicEmit, HiddenChildOccupancyLaws) {
   EXPECT_EQ(h.find("tx0 = x2;"), std::string::npos);
 }
 
+TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
+  // pct(x) / xpct(x) are the %/@ units spelled as a call so they can wrap a
+  // template PARAM (a bare param carries no unit, and the same scalar serves
+  // same-axis for one dimension and cross-axis for the other). With the arg
+  // folded, the emit must be byte-identical to the literal unit.
+  std::vector<uic::Diag> callDiags;
+  const std::string viaCall = emit(
+      "template t {\n"
+      "    in sz: num = 100;\n"
+      "    panel { width: 40h; height: 4h;\n"
+      "        image { texture: /a.tga; width: pct(sz); height: xpct(sz); } } }\n"
+      "t { sz: 95; }\n",
+      &callDiags);
+  ASSERT_TRUE(callDiags.empty())
+      << (callDiags.empty() ? "" : callDiags[0].msg);
+  // parent w0 = 40h, h0 = 4h (distinct). The square icon: width is 95% of the
+  // parent's SAME axis (its width, w0); height is 95% of the CROSS axis (also
+  // the width, w0) — so both land on w0, and xpct picking w0 (not h0) for a
+  // vertical dim is the proof it crossed.
+  EXPECT_NE(viaCall.find("w1 = R(0.949999988f * w0);"), std::string::npos)
+      << viaCall;
+  EXPECT_NE(viaCall.find("h1 = R(0.949999988f * w0);"), std::string::npos)
+      << viaCall;
+
+  // the literal %/@ on the same geometry emits the identical two solve lines.
+  std::vector<uic::Diag> litDiags;
+  const std::string viaLiteral = emit(
+      "panel { width: 40h; height: 4h;\n"
+      "    image { texture: /a.tga; width: 95%; height: 95@; } }\n",
+      &litDiags);
+  ASSERT_TRUE(litDiags.empty()) << (litDiags.empty() ? "" : litDiags[0].msg);
+  EXPECT_NE(viaLiteral.find("w1 = R(0.949999988f * w0);"), std::string::npos)
+      << viaLiteral;
+  EXPECT_NE(viaLiteral.find("h1 = R(0.949999988f * w0);"), std::string::npos)
+      << viaLiteral;
+}
+
+TEST(UicEmit, PctBuiltinNonNumericArgIsAnError) {
+  // the arg must fold to a number; a stray identifier is a loud diagnostic,
+  // never a silent zero.
+  std::vector<uic::Diag> diags;
+  emit("panel { width: 40h; height: 4h;\n"
+       "    image { texture: /a.tga; width: pct(nope); height: 2h; } }\n",
+       &diags);
+  EXPECT_TRUE(uic::hasErrors(diags));
+}
+
 } // namespace

@@ -102,6 +102,35 @@ Dim parseDim(const std::string &s) {
   return d;
 }
 
+// A size value may be a unit-CONVERSION builtin: `pct(x)` reads x as a
+// percentage of the parent's same-axis length, `xpct(x)` of the cross axis —
+// the `%` and `@` units, but spelled as a call so they can wrap a template
+// PARAM. (A bare param carries no unit, and the same numeric param is used
+// same-axis for one dimension and cross-axis for the other, so the unit must
+// live at the use site, not in the param.) Same shape as the num/fixed/ord
+// text builtins. Returns false for anything that is not one of these calls.
+bool parseUnitCall(const std::string &v, std::string &name, std::string &arg) {
+  const size_t lp = v.find('(');
+  if (lp == std::string::npos || v.empty() || v.back() != ')') {
+    return false;
+  }
+  name = v.substr(0, lp);
+  if (name != "pct" && name != "xpct") {
+    return false;
+  }
+  arg = v.substr(lp + 1, v.size() - lp - 2);
+  const auto trim = [](std::string &s) {
+    while (!s.empty() && s.front() == ' ') {
+      s.erase(s.begin());
+    }
+    while (!s.empty() && s.back() == ' ') {
+      s.pop_back();
+    }
+  };
+  trim(arg);
+  return true;
+}
+
 // True when a size value is a lone dim in the classic grammar (optional
 // sign, number, optional %/@/h/w unit) or an empty/degenerate substitution
 // — anything that is NOT a multi-term arithmetic or reference expression.
@@ -1363,6 +1392,23 @@ struct Emit {
         v = get(sw.attrs, sizeKey);
       }
       if (v != nullptr) {
+        // pct(x) / xpct(x): x percent of the parent's same- / cross-axis
+        // length. The env is still live here (bagOf ran in this scope), so a
+        // param arg resolves now; the emit is byte-identical to the literal
+        // unit `x%` / `x@` (see dimExpr's kPercent / kOther).
+        std::string bname, barg;
+        if (parseUnitCall(*v, bname, barg)) {
+          const std::string a = substitute(barg);
+          char *end = nullptr;
+          const float val = std::strtof(a.c_str(), &end);
+          if (end == a.c_str() || *end != '\0') {
+            err(n.line, "size builtin '" + bname + "' wants a numeric arg, got '" +
+                            a + "'");
+          }
+          const bool cross = bname == "xpct";
+          const std::string &ref = (horizontal != cross) ? pw : ph;
+          return "R(" + ftos(val / 100.f) + " * " + ref + ")";
+        }
         // A lone dim (or an empty/degenerate substitution) keeps the classic
         // grammar: parseDim + the delta law, WARNING (never failing) on a
         // value it can't parse. Only a genuine arithmetic/reference

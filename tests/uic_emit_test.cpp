@@ -682,6 +682,24 @@ TEST(UicEmit, LabelsDrawRunsAndTheManifestNamesTheirFonts) {
             std::string::npos);
 }
 
+TEST(UicEmit, AnAnimatedImageDrawsItsFirstFrame) {
+  // an animatedimage is not skipped: it renders as a still image of its FIRST
+  // FRAME file. Frames live at `<base>NNNN.<ext>`, so frame 0 is
+  // `<base>0000.<ext>` — the host's static render draws exactly that.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 4h; height: 4h;\n"
+      "    animatedimage { texture: /art/spinner.tga; width: 100%;\n"
+      "                    height: 100%; }\n"
+      "}\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << diags[0].msg;
+  EXPECT_EQ(h.find("widget 'animatedimage'"), std::string::npos); // not skipped
+  EXPECT_NE(h.find("/art/spinner0000.tga"), std::string::npos);      // frame 0
+  EXPECT_EQ(h.find("/art/spinner.tga"), std::string::npos); // NOT the raw path
+  EXPECT_NE(h.find("sink.image("), std::string::npos);
+}
+
 TEST(UicEmit, AFramesRingWearsItsBorderColour) {
   // a frame is two colours: `color` paints the centre piece, `bordercolor`
   // the surrounding eight. The "transparent centre, visible ring" frame is a

@@ -1175,7 +1175,7 @@ struct Emit {
     }
     if (!isState &&
         n.tag != "panel" && n.tag != "image" && n.tag != "frame" &&
-        n.tag != "button" && n.tag != "label") {
+        n.tag != "button" && n.tag != "label" && n.tag != "animatedimage") {
       auto tpl = templates.find(n.tag);
       if (tpl == templates.end()) {
         skip(n.line, "widget '" + n.tag + "'");
@@ -2227,6 +2227,16 @@ struct Emit {
         idExpr = texBind->second;
       } else {
         std::string path = *tex;
+        // an animatedimage's static render is its FIRST FRAME FILE —
+        // frames live at `<base>NNNN.<ext>`, so frame 0 is `<base>0000.<ext>`.
+        // We do not animate (no timer state), so drawing frame
+        // 0 as a still image is the faithful static render.
+        if (n.tag == "animatedimage") {
+          const size_t dot = path.rfind('.');
+          if (dot != std::string::npos) {
+            path = path.substr(0, dot) + "0000" + path.substr(dot);
+          }
+        }
         auto it = assetConsts.find(path);
         if (it != assetConsts.end()) {
           path = it->second;

@@ -1397,6 +1397,27 @@ TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
       << viaLiteral;
 }
 
+TEST(UicEmit, ABlendedSolidFillDrawsThroughTheWhiteTexel) {
+  // A solid fill is a quad only when it is PLAIN. A mask cuts it to shape and
+  // a blend mode changes how it lands — both are image() arguments a quad has
+  // nowhere to carry — so either one routes it through the white texel. Same
+  // ink, and the command says what is actually happening to it.
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 20h; height: 20h;\n"
+      "    panel { texture: $white; rendermode: overlay; color: #555555;\n"
+      "            width: 4h; height: 4h; }\n"
+      "    panel { color: #555555; width: 4h; height: 4h; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  // the blended one goes through image()...
+  EXPECT_NE(h.find("sink.image({ax1, ay1, w1, h1}, ui::Texture::White"),
+            std::string::npos)
+      << h;
+  // ...the plain one stays a quad
+  EXPECT_NE(h.find("sink.quad({ax2, ay2, w2, h2}"), std::string::npos) << h;
+}
+
 TEST(UicEmit, AModelPanelTakesItsPlaceWithoutDrawing) {
   // A 3D viewport yields nothing static, but it is still a widget: skipping it
   // as an unsupported tag dropped it out of the LAYOUT too, which moves every

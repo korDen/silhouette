@@ -2428,8 +2428,15 @@ struct Emit {
       const std::string col = colorLiteral(sw, def);
       const std::string mask = maskOf(bag, n.line);
       const std::string flags = renderFlags(bag, &sw);
+      // A SOLID FILL IS A QUAD ONLY WHEN IT IS PLAIN. A mask cuts it to shape
+      // and a blend mode changes how it lands, and both of those are image()
+      // arguments — a quad has nowhere to carry them. So anything masked or
+      // blended draws through the WHITE TEXEL instead, which is the same ink
+      // by another route (there is no "no texture" state at draw time; there
+      // is white). Testing only the mask left a blended fill as a bare quad,
+      // which reads as a different command for identical pixels.
       // a fully transparent widget issues no draw
-      if (mask != "0") {
+      if (mask != "0" || flags != "0") {
         drawLine("if ((" + col + ").a > 0) sink.image(" + dst +
                  ", ui::Texture::White, {0, 0, 1, 1}, " + col + ", " + flags +
                  ", " + mask + ", ui::kNoClip);");

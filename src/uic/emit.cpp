@@ -931,6 +931,30 @@ struct Emit {
     return v;
   }
 
+  // `a ?? b` — a when the caller supplied it, b otherwise. A param carries ONE
+  // declared default, but a template may want a DIFFERENT fallback at each use
+  // of the same param (two labels sharing a `font` param, each with its own
+  // face when nobody passes one). That cannot be said in the declaration, so
+  // it is said at the use. An unset param already folds to empty, so emptiness
+  // IS "not supplied" — the same rule the float-chain eligibility test uses.
+  std::string substituteOr(const std::string &v) const {
+    const size_t q = v.find("??");
+    if (q == std::string::npos) {
+      return substitute(v);
+    }
+    const auto trim = [](std::string s) {
+      while (!s.empty() && s.front() == ' ') {
+        s.erase(s.begin());
+      }
+      while (!s.empty() && s.back() == ' ') {
+        s.pop_back();
+      }
+      return s;
+    };
+    const std::string lhs = substitute(trim(v.substr(0, q)));
+    return lhs.empty() ? substitute(trim(v.substr(q + 2))) : lhs;
+  }
+
   // a comma-separated style list, each name trimmed
   static std::vector<std::string> styleNames(const std::string &s) {
     std::vector<std::string> out;
@@ -1043,7 +1067,7 @@ struct Emit {
     }
     if (!envStack.empty()) {
       for (auto &kv : bag) {
-        kv.second = substitute(kv.second);
+        kv.second = substituteOr(kv.second);
       }
     }
     // an interpolation hole must NEVER reach the compiler: a converter's
@@ -1301,7 +1325,7 @@ struct Emit {
         // tone: match fused_state { ... } } — folding the
         // scrutinee here and passing the picked arm on
         const std::string folded =
-            a.isMatch() ? resolveMatch(a) : substitute(a.value);
+            a.isMatch() ? resolveMatch(a) : substituteOr(a.value);
         if (param->isEnum()) {
           // an enum param: the arg must fold to one of its values (a
           // literal, a forward, or a match projection that resolves to one)

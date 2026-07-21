@@ -1397,6 +1397,47 @@ TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
       << viaLiteral;
 }
 
+TEST(UicEmit, AnOrFallbackPicksPerUseWhenTheCallerSaysNothing) {
+  // `a ?? b` — a param carries ONE declared default, but a template may want a
+  // DIFFERENT fallback at each USE of that param. Two labels share `face`;
+  // with no caller value each keeps its own, and when the caller does supply
+  // one it wins at BOTH uses.
+  std::vector<uic::Diag> quiet;
+  const std::string unset = emit(
+      "template t {\n"
+      "    in face: ident;\n"
+      "    panel { width: 20h; height: 8h;\n"
+      "        label { font: face ?? round; content: \"a\";\n"
+      "                width: 5h; height: 2h; }\n"
+      "        label { font: face ?? square; content: \"b\";\n"
+      "                width: 5h; height: 2h; } } }\n"
+      "t { }\n",
+      &quiet);
+  // a no-default param with no argument folds to empty and says so — that is
+  // precisely the state `??` exists to answer, so it is a note, not a fault
+  ASSERT_FALSE(uic::hasErrors(quiet));
+  EXPECT_NE(unset.find("\"round\""), std::string::npos) << unset;
+  EXPECT_NE(unset.find("\"square\""), std::string::npos) << unset;
+  EXPECT_EQ(unset.find("??"), std::string::npos) << unset; // fully folded
+
+  std::vector<uic::Diag> quiet2;
+  const std::string given = emit(
+      "template t {\n"
+      "    in face: ident;\n"
+      "    panel { width: 20h; height: 8h;\n"
+      "        label { font: face ?? round; content: \"a\";\n"
+      "                width: 5h; height: 2h; }\n"
+      "        label { font: face ?? square; content: \"b\";\n"
+      "                width: 5h; height: 2h; } } }\n"
+      "t { face: solid; }\n",
+      &quiet2);
+  ASSERT_TRUE(quiet2.empty()) << (quiet2.empty() ? "" : quiet2[0].msg);
+  // supplied: it wins at BOTH uses, neither fallback survives
+  EXPECT_NE(given.find("\"solid\""), std::string::npos) << given;
+  EXPECT_EQ(given.find("\"round\""), std::string::npos) << given;
+  EXPECT_EQ(given.find("\"square\""), std::string::npos) << given;
+}
+
 TEST(UicEmit, ABoundOffsetIsADimChosenAtRuntime) {
   // An offset picked at runtime is still measured in the dim grammar, so a
   // bind on x/y takes dim literals and rounds exactly where a static offset

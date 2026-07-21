@@ -59,6 +59,19 @@ Group operations (transitions) return as a producer-side layer when that
 feature does. A type-erased adapter (function-pointer table) can be added if
 a tool ever needs runtime backend switching.
 
+**Producer-side memoization is legal; command retention is not.** A producer
+(hand-written or generated) may retain its own *inputs and derived values*
+across frames — solved geometry, measured widths, a projection of what it
+read — in caller-owned storage, and use them to skip recomputation. What it
+may not do is retain and replay *the call stream itself*: the sink receives
+a full, freshly-issued immediate stream every frame, every call still fully
+determined by its arguments, so the two reasons above keep holding (no
+stored strings, no baked ordering). The generated retained context is the
+canonical example: it gates the layout solve on the fields that can move
+geometry and always re-emits the draws. Correctness bar: a producer's
+memoized frame must be byte-identical to its stateless render of the same
+inputs — cached-vs-fresh equivalence is a gate, not an aspiration.
+
 ## The primitive set (current)
 
 Chosen so the current consumers' full visual vocabulary maps 1:1 onto native

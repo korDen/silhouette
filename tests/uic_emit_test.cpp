@@ -1397,6 +1397,55 @@ TEST(UicEmit, PctBuiltinFoldsAParamToTheLiteralUnit) {
       << viaLiteral;
 }
 
+TEST(UicEmit, ABoundOffsetIsADimChosenAtRuntime) {
+  // An offset picked at runtime is still measured in the dim grammar, so a
+  // bind on x/y takes dim literals and rounds exactly where a static offset
+  // would. (A widget that slides between two spots must read identically to
+  // one nailed to either.)
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { width: 40h; height: 20h;\n"
+      "    image { texture: /a.tga; width: 2h; height: 2h; align: right;\n"
+      "            bind x: snapshot.unit.hp > 0 ? 12.1h : 5.1h; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  // both arms fold to screen-height fractions, and ONE R() wraps the choice
+  EXPECT_NE(h.find("R(((s.unit.hp > 0) ? (0.121000007f * H) : "
+                   "(0.050999999f * H)))"),
+            std::string::npos)
+      << h;
+  // the align base is still applied — a bound offset is an offset, not a
+  // replacement for alignment
+  EXPECT_NE(h.find("x1 = w0 - w1 + R("), std::string::npos) << h;
+}
+
+TEST(UicEmit, APercentDimInABindIsRefused) {
+  // `%`/`@` are a fraction of a parent along an axis; an expression carries
+  // neither, so resolving one would silently pick the wrong reference.
+  std::vector<uic::Diag> diags;
+  emit("panel { width: 40h; height: 20h;\n"
+       "    image { texture: /a.tga; width: 2h; height: 2h;\n"
+       "            bind x: snapshot.unit.hp > 0 ? 50% : 10%; } }\n",
+       &diags);
+  EXPECT_TRUE(uic::hasErrors(diags));
+}
+
+TEST(UicEmit, ABoundOffsetOptsOutOfTheFloatChain) {
+  // an explicit offset opts a child out of the float chain; a BOUND one does
+  // so unconditionally, since its value is not knowable until it runs
+  std::vector<uic::Diag> diags;
+  const std::string h = emit(
+      "panel { float: left; width: 40h; height: 4h;\n"
+      "    image { texture: /a.tga; width: 2h; height: 2h; }\n"
+      "    image { texture: /b.tga; width: 2h; height: 2h;\n"
+      "            bind x: snapshot.unit.hp > 0 ? 3h : 1h; } }\n",
+      &diags);
+  ASSERT_TRUE(diags.empty()) << (diags.empty() ? "" : diags[0].msg);
+  // the bound child positions plainly, never from the chain target
+  EXPECT_NE(h.find("x2 = 0.0f + R(((s.unit.hp > 0) ?"), std::string::npos)
+      << h;
+}
+
 TEST(UicEmit, PctBuiltinNonNumericArgIsAnError) {
   // the arg must fold to a number; a stray identifier is a loud diagnostic,
   // never a silent zero.

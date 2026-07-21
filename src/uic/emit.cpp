@@ -577,8 +577,28 @@ struct Emit {
       return texIdExpr(e.text, e.line);
     case Expr::kColor:
       return colorFrom(e.text, e.line);
+    case Expr::kDim: {
+      // A dim literal is a real value in a bind — an offset picked at
+      // runtime is still measured in the dim grammar. Only the SELF-
+      // CONTAINED units fold here: px, `h` and `w` need nothing but the
+      // screen. `%` and `@` are a fraction of a parent along an axis, and
+      // an expression carries neither, so they are refused rather than
+      // silently resolved against the wrong thing. Left unrounded: the
+      // consuming attribute rounds, exactly as it does for a static dim.
+      const Dim d = parseDim(e.text);
+      if (d.kind == Dim::kPercent || d.kind == Dim::kOther) {
+        err(e.line, "'" + e.text +
+                        "' in a bind: a percent dim needs a parent and an "
+                        "axis to resolve against — use px, h or w");
+        return "0";
+      }
+      if (d.kind == Dim::kBad) {
+        err(e.line, "unsupported dim '" + e.text + "' in bind");
+        return "0";
+      }
+      return "(" + dimExpr(d, true, "0.0f", "0.0f", false) + ")";
+    }
     case Expr::kString:
-    case Expr::kDim:
       err(e.line, "literal kind not yet allowed in binds");
       return "0";
     case Expr::kField:
@@ -1481,11 +1501,23 @@ struct Emit {
     // ---- position (the spec's position laws)
     const std::string *xAttr = get(sw.attrs, "x");
     const std::string *yAttr = get(sw.attrs, "y");
+    // A BOUND offset is the same dim, chosen at runtime — it replaces the
+    // static one and is rounded by the same R() below, so a widget that
+    // slides between two positions reads identically to one nailed to
+    // either of them.
+    const auto xBind = sw.binds.find("x");
+    const auto yBind = sw.binds.find("y");
+    const bool hasXBind = xBind != sw.binds.end();
+    const bool hasYBind = yBind != sw.binds.end();
     std::string xOff = "0.0f", yOff = "0.0f";
-    if (xAttr != nullptr) {
+    if (hasXBind) {
+      xOff = xBind->second;
+    } else if (xAttr != nullptr) {
       xOff = dimExpr(parseDim(*xAttr), true, pw, ph, false);
     }
-    if (yAttr != nullptr) {
+    if (hasYBind) {
+      yOff = yBind->second;
+    } else if (yAttr != nullptr) {
       yOff = dimExpr(parseDim(*yAttr), false, pw, ph, false);
     }
     const std::string *al = get(sw.attrs, "align");
@@ -1515,7 +1547,10 @@ struct Emit {
     // both qualify; a set offset like "0h" does not. A template threading
     // `y: y` from an unset no-default param folds y to "", so testing the
     // attr's PRESENCE would wrongly opt it out; test the VALUE's emptiness.
-    const bool chains = chain.axis != 0 &&
+    // A BOUND offset is an offset: it opts the widget out of the chain just
+    // as a static one does, and unconditionally — its emptiness is not
+    // knowable until it runs.
+    const bool chains = chain.axis != 0 && !hasXBind && !hasYBind &&
                         (xAttr == nullptr || xAttr->empty()) &&
                         (yAttr == nullptr || yAttr->empty()) && !isState;
     if (chains) {
